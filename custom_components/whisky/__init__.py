@@ -1,31 +1,39 @@
-"""Whisky v0.4.0 — Collection de whiskies pour Home Assistant.
+"""Whisky v0.5.0 — Collection de whiskies pour Home Assistant.
 
 Projet indépendant dérivé de Millésime (github.com/Redsklns/ha-millesime,
 MIT) : même style d'architecture (stockage JSON local, casiers/emplacements
 agnostiques, carte Lovelace auto-servie), vocabulaire et modèle de données
 entièrement propres au whisky.
 
-Commit 4/12 : + capteurs Home Assistant (sensor.py). Pas encore de
-reconnaissance photo (commit 5).
+Commit 5/12 : + reconnaissance Gemini (texte + photo), prompt dédié whisky
+distinct du prompt vin de Millésime. Aucune dépendance à Whiskybase ou toute
+autre base fermée (brief §2/§18) — sans clé Gemini, saisie manuelle
+uniquement, aucun repli automatique (documenté comme limitation).
 """
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime
 
+import voluptuous as vol
+from homeassistant.components import websocket_api
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 _LOGGER = logging.getLogger(__name__)
 
 DOMAIN    = "whisky"
 PLATFORMS = ["sensor"]
 DATA_FILE = "whisky_data.json"
-VERSION   = "0.4.0"
+VERSION   = "0.5.0"
 
 # ── Classification whisky (brief §2) ──────────────────────────────────────────
 # Liste FERMÉE utilisée pour valider whisky_meta.whisky_type. "Other" couvre
@@ -248,6 +256,505 @@ def _new_whisky_record(name: str, whisky_meta: dict | None = None, **fields) -> 
     return record
 
 
+# ── Gemini : découverte de modèles + appel unifié ────────────────────────────
+# Infrastructure reprise quasiment à l'identique de Millésime (composant
+# éprouvé : repli de modèle, gestion du "thinking", récupération de réponse
+# tronquée) — seuls les libellés de log changent. Voir Millésime __init__.py
+# pour l'historique des correctifs (v7.1.3 à v7.1.8) qui ont amené cette forme.
+
+GEMINI_TEXT_MODEL      = "gemini-2.5-flash"
+GEMINI_VISION_MODEL    = "gemini-2.5-flash"
+GEMINI_TEXT_FALLBACK   = "gemini-2.5-flash-lite"
+GEMINI_VISION_FALLBACK = "gemini-2.5-flash-lite"
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/"
+
+_PREF_TEXT = [
+    "gemini-3.5-flash", "gemini-3.1-flash", "gemini-3-flash",
+    "gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite",
+]
+_PREF_VISION = [
+    "gemini-3.5-flash", "gemini-3.1-flash", "gemini-3-flash",
+    "gemini-2.5-flash", "gemini-2.5-flash-lite",
+]
+_GEMINI_MODELS: dict = {"text": None, "vision": None, "discovered": False}
+
+ERR_QUOTA_EXCEEDED = "quota_exceeded"
+ERR_INVALID_KEY    = "invalid_key"
+ERR_UNAVAILABLE    = "service_unavailable"
+ERR_PARSE_ERROR    = "parse_error"
+ERR_NO_MODEL       = "no_model"
+ERR_TIMEOUT        = "timeout"
+ERR_TRUNCATED      = "truncated"
+ERR_NO_KEY         = "no_key"
+
+
+async def _discover_gemini_models(hass: HomeAssistant, api_key: str) -> None:
+    """Sélectionne les meilleurs modèles texte/vision réellement disponibles
+    pour la clé donnée. Silencieux et non bloquant : en cas d'échec, les
+    modèles de repli stables (2.5) restent en vigueur."""
+    if not api_key:
+        return
+    session = async_get_clientsession(hass)
+    try:
+        async with session.get(
+            "https://generativelanguage.googleapis.com/v1beta/models",
+            params={"key": api_key, "pageSize": "200"},
+            timeout=15,
+        ) as resp:
+            if resp.status != 200:
+                _LOGGER.warning("Whisky — découverte modèles Gemini : HTTP %s, repli stable", resp.status)
+                return
+            data = await resp.json(content_type=None)
+    except Exception as exc:
+        _LOGGER.warning("Whisky — découverte modèles Gemini impossible (%s), repli stable", exc)
+        return
+
+    available: set[str] = set()
+    for m in data.get("models", []):
+        name = (m.get("name") or "").split("/")[-1]
+        methods = m.get("supportedGenerationMethods") or m.get("supportedActions") or []
+        if name and (not methods or "generateContent" in methods):
+            available.add(name)
+    if not available:
+        _LOGGER.warning("Whisky — découverte modèles : liste vide, repli stable")
+        return
+
+    def _pick(prefs: list[str], fallback: str) -> list[str]:
+        chosen = [m for m in prefs if m in available]
+        if fallback in available and fallback not in chosen:
+            chosen.append(fallback)
+        if not chosen:
+            chosen = [m for m in sorted(available) if "flash" in m][:2] or sorted(available)[:1]
+        return chosen
+
+    _GEMINI_MODELS["text"] = _pick(_PREF_TEXT, GEMINI_TEXT_FALLBACK)
+    _GEMINI_MODELS["vision"] = _pick(_PREF_VISION, GEMINI_VISION_FALLBACK)
+    _GEMINI_MODELS["discovered"] = True
+    _LOGGER.info("Whisky — modèles Gemini découverts : texte=%s | vision=%s",
+                 _GEMINI_MODELS["text"], _GEMINI_MODELS["vision"])
+
+
+def _thinking_cfg(model: str) -> dict:
+    m = (model or "").lower()
+    if "2.5" in m:
+        return {"thinkingConfig": {"thinkingBudget": 0}}
+    if m.startswith("gemini-3"):
+        return {"thinkingConfig": {"thinkingLevel": "low"}}
+    return {}
+
+
+def _gen_cfg(model: str, base: dict) -> dict:
+    return {**base, **_thinking_cfg(model)}
+
+
+def _text_models() -> list[str]:
+    return _GEMINI_MODELS["text"] or [GEMINI_TEXT_MODEL, GEMINI_TEXT_FALLBACK]
+
+
+def _vision_models() -> list[str]:
+    return _GEMINI_MODELS["vision"] or [GEMINI_VISION_MODEL, GEMINI_VISION_FALLBACK]
+
+
+def _gemini_error_code(status: int) -> str:
+    if status == 429:
+        return ERR_QUOTA_EXCEEDED
+    if status in (400, 401, 403):
+        return ERR_INVALID_KEY
+    return ERR_UNAVAILABLE
+
+
+async def _gemini_call(
+    hass: HomeAssistant, api_key: str, models: list[str], body_base: dict,
+    gen_cfg: dict, timeout: int, label: str, session=None,
+) -> tuple[dict | None, str | None]:
+    """Appel Gemini unifié : repli de modèle sur 404/5xx, réessai sans
+    "thinking" sur 400/500/503, arrêt immédiat sur 429/clé invalide."""
+    session = session or async_get_clientsession(hass)
+    saw_404 = saw_timeout = saw_other = False
+
+    for model in models:
+        for attempt in (0, 1):
+            cfg = _gen_cfg(model, gen_cfg) if attempt == 0 else dict(gen_cfg)
+            body = {**body_base, "generationConfig": cfg}
+            try:
+                async with session.post(
+                    f"{GEMINI_BASE_URL}{model}:generateContent",
+                    params={"key": api_key},
+                    json=body,
+                    headers={"Content-Type": "application/json"},
+                    timeout=timeout,
+                ) as resp:
+                    status = resp.status
+                    if status == 200:
+                        data = await resp.json(content_type=None)
+                        _LOGGER.debug("%s : réponse de %s", label, model)
+                        return data, None
+                    if status in (400, 500, 503) and attempt == 0 and _thinking_cfg(model):
+                        _LOGGER.warning(
+                            "%s : HTTP %s avec thinkingConfig (%s) → réessai sans ce réglage",
+                            label, status, model)
+                        continue
+                    if status == 404:
+                        saw_404 = True
+                        _LOGGER.warning("%s : modèle %s indisponible (404), repli", label, model)
+                        break
+                    if status in (429, 400, 401, 403):
+                        saw_other = True
+                        _LOGGER.warning("%s : HTTP %s sur %s", label, status, model)
+                        return None, _gemini_error_code(status)
+                    saw_other = True
+                    _LOGGER.warning("%s : HTTP %s sur %s, repli", label, status, model)
+                    break
+            except asyncio.TimeoutError:
+                saw_timeout = True
+                _LOGGER.warning("%s : délai dépassé (%s, %ss)", label, model, timeout)
+                break
+            except Exception as exc:
+                saw_other = True
+                _LOGGER.warning("%s : erreur (%s) %s", label, model, exc)
+                break
+
+    if saw_404 and not saw_other and not saw_timeout:
+        _LOGGER.error(
+            "%s : AUCUN modèle utilisable (%s). Vérifiez l'accès de votre clé "
+            "Gemini aux modèles sur aistudio.google.com.", label, ", ".join(models))
+        if not _GEMINI_MODELS["discovered"] and api_key:
+            hass.async_create_task(_discover_gemini_models(hass, api_key))
+        return None, ERR_NO_MODEL
+    if saw_timeout and not saw_other:
+        return None, ERR_TIMEOUT
+    return None, ERR_UNAVAILABLE
+
+
+def _gemini_text(data: dict) -> tuple[str, str]:
+    """Texte utile d'une réponse Gemini + finishReason (écarte les parties
+    de réflexion "thought", ne prend jamais qu'un premier fragment vide)."""
+    cand = (data.get("candidates") or [{}])[0] or {}
+    finish = cand.get("finishReason") or ""
+    parts = (cand.get("content") or {}).get("parts") or []
+    chunks = []
+    for p in parts:
+        if not isinstance(p, dict) or p.get("thought"):
+            continue
+        t = p.get("text")
+        if isinstance(t, str) and t.strip():
+            chunks.append(t)
+    return "".join(chunks), finish
+
+
+def _json_salvage(txt: str):
+    """Récupère les objets JSON complets d'une réponse tronquée par la limite
+    de tokens, plutôt que de tout rejeter pour un dernier objet coupé."""
+    if not txt:
+        return None
+    s = txt.strip()
+    if s.startswith("["):
+        objs, depth, start, in_str, esc = [], 0, None, False, False
+        for i, ch in enumerate(s):
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0 and start is not None:
+                    frag = s[start:i + 1]
+                    try:
+                        objs.append(json.loads(frag))
+                    except Exception:
+                        pass
+                    start = None
+        return objs or None
+    if s.startswith("{"):
+        for cut in range(len(s), 0, -1):
+            frag = s[:cut].rstrip().rstrip(",")
+            for suffix in ("", "}", '"}', "]}", '"]}'):
+                try:
+                    return json.loads(frag + suffix)
+                except Exception:
+                    continue
+            if len(s) - cut > 4000:
+                break
+    return None
+
+
+def _gemini_payload(data: dict):
+    """JSON d'une réponse Gemini, tolérant aux enrobages (```json, texte
+    parasite, réponse tronquée récupérée partiellement)."""
+    raw, finish = _gemini_text(data)
+    if not raw.strip():
+        raise ValueError(f"réponse vide (finishReason={finish or '?'})")
+    txt = re.sub(r"^```(?:json)?\s*", "", raw.strip())
+    txt = re.sub(r"\s*```$", "", txt).strip()
+    try:
+        return json.loads(txt)
+    except Exception:
+        pass
+    for op, cl in (("{", "}"), ("[", "]")):
+        i, j = txt.find(op), txt.rfind(cl)
+        if i != -1 and j > i:
+            try:
+                return json.loads(txt[i:j + 1])
+            except Exception:
+                continue
+    salvaged = _json_salvage(txt)
+    if salvaged:
+        _LOGGER.warning("Gemini — réponse coupée (finishReason=%s), contenu partiel récupéré", finish or "?")
+        return salvaged
+    raise ValueError(f"JSON introuvable (finishReason={finish or '?'}, {len(raw)} car.)")
+
+
+# ── Prompt Gemini WHISKY (distinct du prompt vin de Millésime) ──────────────
+# Point critique du brief §4 : un embouteilleur indépendant (Signatory
+# Vintage, Gordon & MacPhail, Cadenhead's, Douglas Laing, Berry Bros. & Rudd,
+# That Boutique-y Whisky Company...) N'EST PAS la distillerie. Le prompt liste
+# des exemples explicites pour éviter cette confusion très fréquente sur les
+# étiquettes de mise en bouteille indépendante.
+_GEMINI_SYSTEM_WHISKY = """\
+Tu es un expert mondial du whisky (single malt, blended, bourbon, rye, \
+whisky japonais...), capable de lire des étiquettes de bouteilles.
+
+Analyse la ou les photos fournies : étiquette principale, contre-étiquette, \
+capsule/scellé, tube ou coffret si visible. Retourne UNIQUEMENT un objet \
+JSON valide {}, sans markdown ni backticks, avec exactement ces champs :
+  name, distillery, bottler, brand, expression,
+  country, region, whisky_type,
+  age, vintage, bottling_year, abv, volume_ml,
+  cask_type, finish, batch, edition, cask_number, bottle_number,
+  limited_edition, peated,
+  confidence_score, field_confidence
+
+RÈGLE ABSOLUE — NE JAMAIS INVENTER : pour CHAQUE champ que tu ne peux pas \
+lire avec certitude sur l'image ou déduire sans ambiguïté, retourne JSON \
+null pour ce champ. Un champ null vaut toujours mieux qu'une supposition. \
+N'utilise JAMAIS une valeur plausible mais non lue sur l'étiquette.
+
+DISTINCTION CRITIQUE distillery / bottler — une bouteille de mise en \
+bouteille INDÉPENDANTE porte le nom de l'embouteilleur bien plus gros que \
+celui de la distillerie d'origine (parfois même absente du visuel). \
+N'assimile JAMAIS automatiquement le nom le plus visible à la distillerie. \
+Exemples d'embouteilleurs indépendants connus, à mettre dans "bottler" et \
+JAMAIS dans "distillery" : Signatory Vintage, Gordon & MacPhail, \
+Cadenhead's, Douglas Laing (Old Particular, Xtra Old Particular...), \
+Berry Bros. & Rudd, That Boutique-y Whisky Company, Hunter Laing, \
+The Single Cask, Adelphi. Exemple : une étiquette "Signatory Vintage — \
+Caol Ila 2012, 11 Year Old" donne bottler="Signatory Vintage" et \
+distillery="Caol Ila" — jamais l'inverse. Si aucun nom de distillerie \
+n'est identifiable alors qu'un embouteilleur l'est, laisse "distillery" à \
+null plutôt que de recopier le nom de l'embouteilleur.
+
+Règles par champ :
+- name : nom complet tel qu'il apparaîtrait sur une fiche (ex. "Caol Ila 11 \
+  Year Old — Signatory Vintage"), jamais null si une étiquette est lisible
+- whisky_type : UNIQUEMENT l'une de ces valeurs, ou null si incertain : \
+  "Single Malt", "Blended Malt", "Blended Whisky", "Single Grain", \
+  "Bourbon", "Rye", "Tennessee Whiskey", "Corn Whiskey", \
+  "Irish Single Malt", "Irish Pot Still", "Japanese Whisky", \
+  "World Whisky", "Other"
+- age : nombre d'années en chaîne (ex. "16"), null si non-millésimé (NAS)
+- vintage / bottling_year : année à 4 chiffres en chaîne, ou null
+- abv : nombre décimal (% vol, ex. 43.0), null si illisible
+- volume_ml : nombre entier (700 le plus courant), null si illisible
+- cask_type : type de fût en texte libre (ex. "First Fill Oloroso Sherry \
+  Butt"), null si non mentionné
+- peated : true/false uniquement si mentionné ou déductible avec certitude \
+  (ex. distillerie notoirement tourbée ET rien ne l'indique autrement) ; \
+  null dans le doute — NE DEVINE PAS à partir du seul nom de distillerie
+- limited_edition : true si "limited edition"/"édition limitée"/numérotation \
+  explicite visible, sinon null
+- confidence_score : nombre décimal 0.0 à 1.0, confiance GLOBALE de \
+  l'identification
+- field_confidence : objet {"champ": 0.0-1.0, ...} — confiance uniquement \
+  pour les champs que tu as renseignés (non null) ; omets les champs null
+
+Si l'image n'est manifestement pas une bouteille de whisky, retourne \
+{"name": null, "confidence_score": 0.0, "field_confidence": {}} et laisse \
+tous les autres champs à null.\
+"""
+
+
+def _safe_float_or_none(value):
+    if value is None:
+        return None
+    try:
+        return float(str(value).replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_bool_or_none(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if s in ("true", "1", "oui", "yes"):
+        return True
+    if s in ("false", "0", "non", "no"):
+        return False
+    return None
+
+
+def _clean_str_or_none(value) -> str | None:
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s or None
+
+
+_WHISKY_RESULT_FIELDS = (
+    "name", "distillery", "bottler", "brand", "expression",
+    "country", "region", "whisky_type",
+    "age", "vintage", "bottling_year",
+    "cask_type", "finish", "batch", "edition", "cask_number", "bottle_number",
+)
+_WHISKY_RESULT_FLOAT_FIELDS = ("abv",)
+_WHISKY_RESULT_INT_FIELDS = ("volume_ml",)
+_WHISKY_RESULT_BOOL_FIELDS = ("limited_edition", "peated")
+
+
+def _parse_gemini_whisky_response(raw: str, source: str, finish: str = "") -> tuple[dict | None, str | None]:
+    """Parse la réponse JSON Gemini whisky.
+
+    Contrairement au parseur vin de Millésime (qui force une valeur par
+    défaut sur chaque champ), CHAQUE CHAMP RESTE None quand l'IA a répondu
+    null ou a omis le champ — jamais de valeur inventée pour "faire propre"
+    (brief §3 : null plutôt qu'une hallucination). C'est à l'écran de
+    validation utilisateur (commit 6) de présenter ces trous, pas à ce
+    parseur de les combler.
+
+    Retourne (résultat | None, code_erreur | None).
+    """
+    if not raw:
+        _LOGGER.warning("Gemini whisky — réponse vide (%s, finishReason=%s)", source, finish or "?")
+        return None, ERR_TRUNCATED if finish == "MAX_TOKENS" else ERR_PARSE_ERROR
+
+    txt = re.sub(r"^```(?:json)?\s*", "", raw.strip())
+    txt = re.sub(r"\s*```$", "", txt)
+
+    try:
+        parsed = json.loads(txt)
+    except json.JSONDecodeError:
+        parsed = _json_salvage(txt)
+        if not parsed:
+            _LOGGER.warning(
+                "Gemini whisky — JSON illisible (%s, finishReason=%s, %d car.) : %.200s",
+                source, finish or "?", len(txt), txt,
+            )
+            return None, ERR_TRUNCATED if finish == "MAX_TOKENS" else ERR_PARSE_ERROR
+
+    if isinstance(parsed, list):
+        parsed = parsed[0] if parsed else {}
+    if not isinstance(parsed, dict):
+        return None, ERR_PARSE_ERROR
+
+    result: dict = {}
+    for f in _WHISKY_RESULT_FIELDS:
+        result[f] = _clean_str_or_none(parsed.get(f))
+    for f in _WHISKY_RESULT_FLOAT_FIELDS:
+        result[f] = _safe_float_or_none(parsed.get(f))
+    for f in _WHISKY_RESULT_INT_FIELDS:
+        v = _safe_float_or_none(parsed.get(f))
+        result[f] = int(v) if v is not None else None
+    for f in _WHISKY_RESULT_BOOL_FIELDS:
+        result[f] = _safe_bool_or_none(parsed.get(f))
+
+    if result.get("whisky_type") and result["whisky_type"] not in WHISKY_TYPE_VALUES:
+        # Normalisation souple (casse/espaces) avant d'abandonner à "Other"
+        match = next((v for v in WHISKY_TYPE_VALUES
+                      if v.lower() == result["whisky_type"].strip().lower()), None)
+        result["whisky_type"] = match  # None si aucune correspondance : on ne force pas "Other"
+
+    score = _safe_float_or_none(parsed.get("confidence_score"))
+    result["confidence_score"] = max(0.0, min(1.0, score)) if score is not None else None
+
+    field_conf = parsed.get("field_confidence")
+    result["field_confidence"] = (
+        {k: max(0.0, min(1.0, v)) for k, v in field_conf.items() if isinstance(v, (int, float))}
+        if isinstance(field_conf, dict) else {}
+    )
+
+    if not result.get("name") and not any(
+        result.get(f) for f in _WHISKY_RESULT_FIELDS if f != "name"
+    ):
+        # Rien d'exploitable : image non reconnue comme whisky, ou vide
+        return None, None
+
+    return result, None
+
+
+async def _gemini_analyze_whisky_photo(
+    hass: HomeAssistant, image_b64: str, mime_type: str, api_key: str
+) -> tuple[dict | None, str | None]:
+    """Analyse une photo d'étiquette de whisky via Gemini Vision."""
+    body = {
+        "system_instruction": {"parts": [{"text": _GEMINI_SYSTEM_WHISKY}]},
+        "contents": [{
+            "parts": [
+                {"text": "Identifie ce whisky à partir de cette photo."},
+                {"inline_data": {"mime_type": mime_type, "data": image_b64}},
+            ]
+        }],
+    }
+    gen = {"temperature": 0.1, "maxOutputTokens": 2048, "responseMimeType": "application/json"}
+    data, last_code = None, ERR_UNAVAILABLE
+    for attempt in range(2):
+        data, last_code = await _gemini_call(
+            hass, api_key, _vision_models(), body, gen, 45, "Gemini whisky photo",
+        )
+        if data is not None or last_code not in (ERR_UNAVAILABLE, ERR_TIMEOUT):
+            break
+        if attempt == 0:
+            await asyncio.sleep(3.0)
+
+    if data is None:
+        _LOGGER.warning("Gemini whisky photo : échec sur tous les modèles (%s)", last_code)
+        return None, last_code or ERR_UNAVAILABLE
+
+    raw, finish = _gemini_text(data)
+    try:
+        result, err = _parse_gemini_whisky_response(raw, "photo", finish)
+    except Exception as exc:
+        _LOGGER.warning("Gemini whisky photo : erreur de lecture (%s)", exc)
+        return None, ERR_TRUNCATED if finish == "MAX_TOKENS" else ERR_PARSE_ERROR
+    _LOGGER.info("Gemini whisky photo : %s", "résultat trouvé" if result else "rien d'exploitable")
+    return result, err
+
+
+async def _gemini_search_whisky_text(
+    hass: HomeAssistant, query: str, api_key: str
+) -> tuple[dict | None, str | None]:
+    """Recherche Gemini par nom (pas d'équivalent Open Food Facts pour le
+    whisky : sans clé, cette fonction n'est pas appelée, voir websocket)."""
+    body = {
+        "system_instruction": {"parts": [{"text": _GEMINI_SYSTEM_WHISKY}]},
+        "contents": [{"parts": [{"text": f'Identifie ce whisky : "{query}"'}]}],
+    }
+    gen = {"temperature": 0.2, "maxOutputTokens": 2048, "responseMimeType": "application/json"}
+    data, code = await _gemini_call(
+        hass, api_key, _text_models(), body, gen, 30, f"Gemini whisky texte '{query}'",
+    )
+    if data is None:
+        return None, code or ERR_UNAVAILABLE
+    raw, finish = _gemini_text(data)
+    try:
+        result, err = _parse_gemini_whisky_response(raw, f"texte:'{query}'", finish)
+        return result, err
+    except Exception as exc:
+        _LOGGER.warning("Gemini whisky texte erreur pour '%s': %s", query, exc)
+        return None, ERR_UNAVAILABLE
+
+
 # ── Carte Lovelace : auto-service (repris à l'identique du fork Millésime) ──
 
 _CARD_URL_PATH = "/whisky/whisky-card.js"
@@ -341,7 +848,59 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
+    # Découverte des modèles Gemini en tâche de fond (repli stable tant que
+    # non résolue) — voir _discover_gemini_models.
+    if gemini_key:
+        hass.async_create_task(_discover_gemini_models(hass, gemini_key))
+
     await _async_register_card(hass)
+
+    # ── WebSocket : reconnaissance photo / texte ─────────────────────────────
+
+    @websocket_api.websocket_command({
+        vol.Required("type"):      "whisky/analyze_photo",
+        vol.Required("image_b64"): str,
+        vol.Required("mime_type"): str,
+    })
+    @websocket_api.async_response
+    async def ws_analyze_photo(hass: HomeAssistant, connection, msg: dict) -> None:
+        gkey = hass.data[DOMAIN][entry.entry_id]["gemini_key"]
+        if not gkey:
+            connection.send_result(msg["id"], {"result": None, "error": ERR_NO_KEY})
+            return
+        result, err = await _gemini_analyze_whisky_photo(hass, msg["image_b64"], msg["mime_type"], gkey)
+        connection.send_result(msg["id"], {"result": result, "error": err})
+
+    websocket_api.async_register_command(hass, ws_analyze_photo)
+
+    @websocket_api.websocket_command({
+        vol.Required("type"):  "whisky/search_whisky",
+        vol.Required("query"): str,
+    })
+    @websocket_api.async_response
+    async def ws_search_whisky(hass: HomeAssistant, connection, msg: dict) -> None:
+        gkey = hass.data[DOMAIN][entry.entry_id]["gemini_key"]
+        query = (msg.get("query") or "").strip()
+        if not gkey:
+            connection.send_result(msg["id"], {"result": None, "error": ERR_NO_KEY})
+            return
+        if len(query) < 3:
+            connection.send_result(msg["id"], {"result": None, "error": None})
+            return
+        result, err = await _gemini_search_whisky_text(hass, query, gkey)
+        connection.send_result(msg["id"], {"result": result, "error": err})
+
+    websocket_api.async_register_command(hass, ws_search_whisky)
+
+    # ── WebSocket : get_data (chargement complet côté carte) ──────────────────
+
+    @websocket_api.websocket_command({vol.Required("type"): "whisky/get_data"})
+    @websocket_api.async_response
+    async def ws_get_data(hass: HomeAssistant, connection, msg: dict) -> None:
+        result = await hass.async_add_executor_job(_load, hass)
+        connection.send_result(msg["id"], result)
+
+    websocket_api.async_register_command(hass, ws_get_data)
 
     # ── Services ──────────────────────────────────────────────────────────────
 
@@ -627,7 +1186,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
     new_key = (entry.options.get("gemini_api_key") or "").strip()
     hass.data[DOMAIN][entry.entry_id]["gemini_key"] = new_key
-    _LOGGER.info("Whisky — clé Gemini mise à jour")
+    # La clé a changé → re-découvrir les modèles disponibles pour elle
+    _GEMINI_MODELS["text"] = _GEMINI_MODELS["vision"] = None
+    _GEMINI_MODELS["discovered"] = False
+    if new_key:
+        hass.async_create_task(_discover_gemini_models(hass, new_key))
+    _LOGGER.info("Whisky — clé Gemini mise à jour, modèles à redécouvrir")
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
