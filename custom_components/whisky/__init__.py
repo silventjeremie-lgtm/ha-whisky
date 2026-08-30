@@ -1,13 +1,13 @@
-"""Whisky v0.2.0 — Collection de whiskies pour Home Assistant.
+"""Whisky v0.3.0 — Collection de whiskies pour Home Assistant.
 
 Projet indépendant dérivé de Millésime (github.com/Redsklns/ha-millesime,
 MIT) : même style d'architecture (stockage JSON local, casiers/emplacements
 agnostiques, carte Lovelace auto-servie), vocabulaire et modèle de données
 entièrement propres au whisky.
 
-Commit 2/12 : modèle de données complet (fiche whisky, casiers/emplacements,
-constantes de classification) + helpers de stockage. Pas encore de services
-d'écriture exposés à l'utilisateur (commit 3) ni de capteurs (commit 4).
+Commit 3/12 : services CRUD (fiches whisky, emplacements, étagères, caves,
+cycle de vie sealed→opened→finished). Pas encore de capteurs (commit 4) ni
+de reconnaissance photo (commit 5).
 """
 from __future__ import annotations
 
@@ -18,14 +18,15 @@ import uuid
 from datetime import datetime
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import HomeAssistantError
 
 _LOGGER = logging.getLogger(__name__)
 
 DOMAIN    = "whisky"
 PLATFORMS = ["sensor"]
 DATA_FILE = "whisky_data.json"
-VERSION   = "0.2.0"
+VERSION   = "0.3.0"
 
 # ── Classification whisky (brief §2) ──────────────────────────────────────────
 # Liste FERMÉE utilisée pour valider whisky_meta.whisky_type. "Other" couvre
@@ -51,6 +52,30 @@ CASK_TYPE_SUGGESTIONS = [
 # voir _mk_slot ci-dessous : on peut posséder plusieurs exemplaires du même
 # whisky dans des états différents).
 BOTTLE_STATUS_VALUES = ("sealed", "opened", "finished")
+
+# ── Champs éditables par les services add_whisky/update_whisky ──────────────
+# Séparés en deux groupes : COMMON (niveau fiche, communs à toute future
+# boisson) et META (uniquement whisky_meta). Un appel de service reste PLAT
+# (comme dans Millésime) : add_whisky(distillery=..., cask_type=...) plutôt
+# que d'exiger un sous-dictionnaire — plus simple à remplir depuis Outils de
+# développement → Actions. Le routage vers whisky_meta est interne.
+COMMON_FIELDS = [
+    "image_url", "label_image_url", "price", "current_value", "currency",
+    "purchase_date", "purchase_location", "storage_location", "notes",
+    "favorite", "rating", "barcode", "external_id", "external_url",
+]
+META_FIELDS = [
+    "distillery", "bottler", "brand", "expression",
+    "country", "region", "distillery_location",
+    "whisky_type",
+    "age", "vintage", "bottling_year", "abv", "volume_ml",
+    "chill_filtered", "natural_colour", "peated", "peat_level", "ppm",
+    "maturation", "cask_type", "cask_number", "finish", "maturation_years",
+    "batch", "edition", "bottle_number", "number_of_bottles",
+    "limited_edition", "independent_bottler",
+    "tasting_notes", "nose_notes", "palate_notes", "finish_notes",
+    "whiskybase_id", "whiskybase_url",
+]
 
 # ── Modèle de données ─────────────────────────────────────────────────────────
 # cellars[] : casiers/étagères de rangement (structure physique, réutilisée
@@ -318,6 +343,283 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
     await _async_register_card(hass)
+
+    # ── Services ──────────────────────────────────────────────────────────────
+
+    def _get() -> dict:
+        return hass.data[DOMAIN][entry.entry_id]["data"]
+
+    async def _persist(d: dict) -> None:
+        hass.data[DOMAIN][entry.entry_id]["data"] = d
+        await hass.async_add_executor_job(_save, hass, d)
+        hass.bus.async_fire(f"{DOMAIN}_updated", {})
+
+    def _call_rack_id(call: ServiceCall, default: str = "") -> str:
+        v = call.data.get("rack_id")
+        return default if v is None else v
+
+    def _find_whisky(d: dict, whisky_id: str) -> dict | None:
+        return next((w for w in d.get("whiskies", []) if w["id"] == whisky_id), None)
+
+    # ── Casiers ───────────────────────────────────────────────────────────────
+
+    async def svc_add_rack(call: ServiceCall) -> None:
+        d = _get()
+        cellar = _cellar(d, call.data.get("cellar_id"))
+        cols = int(call.data.get("columns", 6))
+        shelves = int(call.data.get("shelves", 3))
+        levels = max(1, min(4, int(call.data.get("levels", 1))))
+        rack = {
+            "id":      _uid(),
+            "name":    call.data.get("name", f"Étagère {len(cellar['racks']) + 1}"),
+            "columns": cols, "shelves": shelves, "levels": levels,
+            "slots":   cols * shelves * levels,
+        }
+        cellar["racks"].append(rack)
+        await _persist(d)
+
+    async def svc_update_rack(call: ServiceCall) -> None:
+        d = _get()
+        rid = _call_rack_id(call)
+        for r in _all_racks(d):
+            if r["id"] == rid:
+                for k in ("name", "columns", "shelves"):
+                    if k in call.data:
+                        r[k] = call.data[k]
+                if "levels" in call.data:
+                    r["levels"] = max(1, min(4, int(call.data["levels"])))
+                r["slots"] = _rack_capacity(r)
+                break
+        else:
+            raise HomeAssistantError(f"Casier introuvable : {rid}")
+        await _persist(d)
+
+    async def svc_remove_rack(call: ServiceCall) -> None:
+        d = _get()
+        rid = _call_rack_id(call)
+        for c in _cellars(d):
+            c["racks"] = [r for r in c["racks"] if r["id"] != rid]
+        for w in d["whiskies"]:
+            w["slots"] = [s for s in w["slots"] if s["rack_id"] != rid]
+        # Une fiche sans emplacement n'est PAS supprimée automatiquement pour le
+        # whisky (contrairement au fork vin) : une bouteille "finished" peut
+        # légitimement n'avoir plus d'emplacement occupé pertinent tout en
+        # restant un historique de dégustation valide. Seul remove_whisky retire
+        # une fiche.
+        await _persist(d)
+
+    # ── Caves / armoires ──────────────────────────────────────────────────────
+
+    async def svc_add_cellar(call: ServiceCall) -> None:
+        d = _get()
+        cs = _cellars(d)
+        cs.append({"id": _uid(), "name": call.data.get("name", f"Collection {len(cs) + 1}"), "racks": []})
+        await _persist(d)
+
+    async def svc_rename_cellar(call: ServiceCall) -> None:
+        d = _get()
+        cellar = _cellar(d, call.data.get("cellar_id"))
+        cellar["name"] = call.data.get("name", "Collection")
+        await _persist(d)
+
+    async def svc_remove_cellar(call: ServiceCall) -> None:
+        d = _get()
+        cid = call.data.get("cellar_id")
+        cs = _cellars(d)
+        target = next((c for c in cs if c.get("id") == cid), None)
+        if not target:
+            raise HomeAssistantError(f"Collection introuvable : {cid}")
+        if len(cs) <= 1:
+            raise HomeAssistantError("Impossible de supprimer la dernière collection.")
+        if target.get("racks"):
+            raise HomeAssistantError(
+                "Cette collection contient encore des étagères : déplacez ou supprimez-les d'abord."
+            )
+        d["cellars"] = [c for c in cs if c.get("id") != cid]
+        await _persist(d)
+
+    # ── Fiches whisky ─────────────────────────────────────────────────────────
+
+    async def svc_add_whisky(call: ServiceCall) -> None:
+        """Crée une nouvelle fiche whisky, avec un premier emplacement optionnel."""
+        d = _get()
+        name = str(call.data.get("name", "")).strip()
+        if not name:
+            raise HomeAssistantError("Le nom du whisky est requis.")
+        slots = []
+        rack_id = call.data.get("rack_id")
+        if rack_id:
+            slot = int(call.data.get("slot", 0))
+            if _slot_taken(d, rack_id, slot):
+                raise HomeAssistantError(f"L'emplacement n°{slot + 1} est déjà occupé dans cette étagère.")
+            slots = [_mk_slot(rack_id, slot, call.data.get("slot_comment"))]
+        meta = {k: call.data[k] for k in META_FIELDS if k in call.data}
+        common = {k: call.data[k] for k in COMMON_FIELDS if k in call.data}
+        record = _new_whisky_record(name, whisky_meta=meta, slots=slots, **common)
+        d["whiskies"].append(record)
+        await _persist(d)
+        hass.bus.async_fire(f"{DOMAIN}_bottle_added", {"whisky_id": record["id"], "name": name})
+
+    async def svc_update_whisky(call: ServiceCall) -> None:
+        """Met à jour les métadonnées d'une fiche whisky (champs communs + whisky_meta)."""
+        d = _get()
+        whisky_id = call.data["whisky_id"]
+        w = _find_whisky(d, whisky_id)
+        if not w:
+            raise HomeAssistantError(f"Whisky introuvable : {whisky_id}")
+        if "name" in call.data:
+            w["name"] = str(call.data["name"]).strip() or w["name"]
+        for k in COMMON_FIELDS:
+            if k in call.data:
+                w[k] = call.data[k]
+        for k in META_FIELDS:
+            if k in call.data:
+                w["whisky_meta"][k] = call.data[k]
+        await _persist(d)
+
+    async def svc_remove_whisky(call: ServiceCall) -> None:
+        """Supprime une fiche whisky et tous ses emplacements."""
+        d = _get()
+        d["whiskies"] = [w for w in d["whiskies"] if w["id"] != call.data["whisky_id"]]
+        await _persist(d)
+
+    # ── Emplacements (bouteilles physiques) ──────────────────────────────────
+
+    async def svc_add_slot(call: ServiceCall) -> None:
+        """Ajoute un exemplaire physique à une fiche whisky existante."""
+        d = _get()
+        whisky_id = call.data["whisky_id"]
+        rack_id = _call_rack_id(call)
+        slot = int(call.data.get("slot", 0))
+        if _slot_taken(d, rack_id, slot):
+            raise HomeAssistantError(f"L'emplacement n°{slot + 1} est déjà occupé dans cette étagère.")
+        w = _find_whisky(d, whisky_id)
+        if not w:
+            raise HomeAssistantError(f"Whisky introuvable : {whisky_id}")
+        w["slots"].append(_mk_slot(rack_id, slot, call.data.get("comment"), call.data.get("size")))
+        await _persist(d)
+
+    async def svc_update_slot(call: ServiceCall) -> None:
+        """Modifie le format ou le commentaire d'un exemplaire, sans le déplacer."""
+        d = _get()
+        w = _find_whisky(d, call.data["whisky_id"])
+        if not w:
+            raise HomeAssistantError(f"Whisky introuvable : {call.data['whisky_id']}")
+        slot_idx = int(call.data.get("slot_idx", 0))
+        if slot_idx >= len(w["slots"]):
+            raise HomeAssistantError(f"Index d'emplacement {slot_idx} invalide pour ce whisky.")
+        s = w["slots"][slot_idx]
+        for k in ("size", "comment"):
+            if k in call.data:
+                v = str(call.data[k]).strip()
+                if v:
+                    s[k] = v
+                else:
+                    s.pop(k, None)
+        await _persist(d)
+
+    async def svc_move_slot(call: ServiceCall) -> None:
+        """Déplace un exemplaire vers une autre étagère/emplacement."""
+        d = _get()
+        whisky_id = call.data["whisky_id"]
+        slot_idx = int(call.data.get("slot_idx", 0))
+        new_rack = _call_rack_id(call)
+        new_slot = int(call.data.get("slot", 0))
+        if _slot_taken(d, new_rack, new_slot, exclude_whisky_id=whisky_id, exclude_slot_idx=slot_idx):
+            raise HomeAssistantError(f"L'emplacement n°{new_slot + 1} est déjà occupé dans cette étagère.")
+        w = _find_whisky(d, whisky_id)
+        if not w:
+            raise HomeAssistantError(f"Whisky introuvable : {whisky_id}")
+        if slot_idx >= len(w["slots"]):
+            raise HomeAssistantError(f"Index d'emplacement {slot_idx} invalide pour ce whisky.")
+        w["slots"][slot_idx] = {**w["slots"][slot_idx], "rack_id": new_rack, "slot": new_slot}
+        await _persist(d)
+
+    async def svc_remove_slot(call: ServiceCall) -> None:
+        """Retire UN exemplaire. Supprime la fiche si c'était le dernier emplacement."""
+        d = _get()
+        w = _find_whisky(d, call.data["whisky_id"])
+        if not w:
+            raise HomeAssistantError(f"Whisky introuvable : {call.data['whisky_id']}")
+        slot_idx = int(call.data.get("slot_idx", 0))
+        if slot_idx >= len(w["slots"]):
+            raise HomeAssistantError(f"Index d'emplacement {slot_idx} invalide pour ce whisky.")
+        if len(w["slots"]) <= 1:
+            d["whiskies"].remove(w)
+        else:
+            w["slots"].pop(slot_idx)
+        await _persist(d)
+
+    # ── Cycle de vie d'une bouteille : sealed → opened → finished ────────────
+
+    async def svc_open_bottle(call: ServiceCall) -> None:
+        """Marque un exemplaire comme ouvert (sealed → opened)."""
+        d = _get()
+        w = _find_whisky(d, call.data["whisky_id"])
+        if not w:
+            raise HomeAssistantError(f"Whisky introuvable : {call.data['whisky_id']}")
+        slot_idx = int(call.data.get("slot_idx", 0))
+        if slot_idx >= len(w["slots"]):
+            raise HomeAssistantError(f"Index d'emplacement {slot_idx} invalide pour ce whisky.")
+        s = w["slots"][slot_idx]
+        if s.get("bottle_status", "sealed") != "sealed":
+            raise HomeAssistantError("Cette bouteille n'est plus scellée.")
+        s["bottle_status"] = "opened"
+        s["opened_date"] = call.data.get("opened_date") or datetime.now().strftime("%Y-%m-%d")
+        s["remaining_percent"] = 100
+        await _persist(d)
+        hass.bus.async_fire(f"{DOMAIN}_bottle_opened", {
+            "whisky_id": w["id"], "slot_idx": slot_idx, "name": w.get("name", ""),
+        })
+
+    async def svc_finish_bottle(call: ServiceCall) -> None:
+        """Marque un exemplaire comme terminé (opened → finished).
+
+        Contrairement à Millésime (drink_bottle), l'emplacement N'EST PAS
+        supprimé : "finished" est un état de fiche à part entière (brief §2,
+        bottle_status), pas une suppression — l'historique de la bouteille
+        reste consultable. Note/commentaire optionnels archivés sur l'emplacement.
+        """
+        d = _get()
+        w = _find_whisky(d, call.data["whisky_id"])
+        if not w:
+            raise HomeAssistantError(f"Whisky introuvable : {call.data['whisky_id']}")
+        slot_idx = int(call.data.get("slot_idx", 0))
+        if slot_idx >= len(w["slots"]):
+            raise HomeAssistantError(f"Index d'emplacement {slot_idx} invalide pour ce whisky.")
+        s = w["slots"][slot_idx]
+        s["bottle_status"] = "finished"
+        s["remaining_percent"] = 0
+        s["finished_date"] = call.data.get("finished_date") or datetime.now().strftime("%Y-%m-%d")
+        rating = call.data.get("rating")
+        if rating is not None:
+            try:
+                w["rating"] = round(float(str(rating).replace(",", ".")), 1)
+            except (TypeError, ValueError):
+                pass
+        comment = call.data.get("comment")
+        if comment:
+            s["comment"] = str(comment)
+        await _persist(d)
+        hass.bus.async_fire(f"{DOMAIN}_bottle_finished", {
+            "whisky_id": w["id"], "slot_idx": slot_idx, "name": w.get("name", ""),
+        })
+
+    hass.services.async_register(DOMAIN, "add_rack",       svc_add_rack)
+    hass.services.async_register(DOMAIN, "update_rack",    svc_update_rack)
+    hass.services.async_register(DOMAIN, "remove_rack",    svc_remove_rack)
+    hass.services.async_register(DOMAIN, "add_cellar",     svc_add_cellar)
+    hass.services.async_register(DOMAIN, "rename_cellar",  svc_rename_cellar)
+    hass.services.async_register(DOMAIN, "remove_cellar",  svc_remove_cellar)
+    hass.services.async_register(DOMAIN, "add_whisky",     svc_add_whisky)
+    hass.services.async_register(DOMAIN, "update_whisky",  svc_update_whisky)
+    hass.services.async_register(DOMAIN, "remove_whisky",  svc_remove_whisky)
+    hass.services.async_register(DOMAIN, "add_slot",       svc_add_slot)
+    hass.services.async_register(DOMAIN, "update_slot",    svc_update_slot)
+    hass.services.async_register(DOMAIN, "move_slot",      svc_move_slot)
+    hass.services.async_register(DOMAIN, "remove_slot",    svc_remove_slot)
+    hass.services.async_register(DOMAIN, "open_bottle",    svc_open_bottle)
+    hass.services.async_register(DOMAIN, "finish_bottle",  svc_finish_bottle)
 
     _LOGGER.info("Whisky v%s démarré (%d fiche(s))", VERSION, len(data.get("whiskies", [])))
     return True

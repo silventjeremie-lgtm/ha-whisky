@@ -1,1 +1,332 @@
-# Services Whisky — remplis au commit 3.
+add_rack:
+  name: Ajouter une étagère
+  description: Ajoute une étagère de rangement dans une collection.
+  fields:
+    cellar_id:
+      description: ID de la collection (optionnel, la première par défaut)
+    name:
+      description: Nom de l'étagère
+      example: "Vitrine salon"
+    columns:
+      description: Nombre de colonnes
+      example: 6
+    shelves:
+      description: Nombre d'étagères
+      example: 3
+    levels:
+      description: "Niveaux de superposition (1 à 4)"
+      example: 1
+
+update_rack:
+  name: Modifier une étagère
+  description: Modifie une étagère existante.
+  fields:
+    rack_id:
+      description: ID de l'étagère
+      required: true
+    name:
+      description: Nouveau nom
+    columns:
+      description: Nombre de colonnes
+    shelves:
+      description: Nombre d'étagères
+    levels:
+      description: Niveaux de superposition (1 à 4)
+
+remove_rack:
+  name: Supprimer une étagère
+  description: Supprime une étagère. Les bouteilles qui s'y trouvaient perdent leur emplacement mais restent dans la collection.
+  fields:
+    rack_id:
+      description: ID de l'étagère
+      required: true
+
+add_cellar:
+  name: Ajouter une collection
+  description: Crée une nouvelle collection (armoire) vide dans l'instance.
+  fields:
+    name:
+      description: Nom de la collection
+      example: "Collection bureau"
+
+rename_cellar:
+  name: Renommer une collection
+  description: Change le nom d'une collection (la première si cellar_id est omis).
+  fields:
+    cellar_id:
+      description: ID de la collection (optionnel)
+    name:
+      description: Nouveau nom
+      required: true
+
+remove_cellar:
+  name: Supprimer une collection
+  description: Supprime une collection vide (refusé si elle contient des étagères ou si c'est la dernière).
+  fields:
+    cellar_id:
+      description: ID de la collection
+      required: true
+
+add_whisky:
+  name: Ajouter un whisky
+  description: Ajoute une fiche whisky à la collection, avec un premier emplacement optionnel.
+  fields:
+    name:
+      description: Nom de la fiche (ex. "Lagavulin 16 Years Old")
+      required: true
+      example: "Lagavulin 16 Years Old"
+    rack_id:
+      description: ID de l'étagère de destination (optionnel — fiche sans emplacement si omis)
+    slot:
+      description: Numéro d'emplacement dans l'étagère
+      example: 0
+    distillery:
+      description: Distillerie
+      example: "Lagavulin"
+    bottler:
+      description: Embouteilleur indépendant (si différent de la distillerie)
+    brand:
+      description: Marque commerciale
+    expression:
+      description: "Expression / cuvée (ex. \"16 Year Old\")"
+    country:
+      description: Pays
+      example: "Écosse"
+    region:
+      description: Région
+      example: "Islay"
+    distillery_location:
+      description: Localisation précise de la distillerie
+    whisky_type:
+      description: "Type : Single Malt, Blended Malt, Blended Whisky, Single Grain, Bourbon, Rye, Tennessee Whiskey, Corn Whiskey, Irish Single Malt, Irish Pot Still, Japanese Whisky, World Whisky, Other"
+      example: "Single Malt"
+    age:
+      description: Âge (années)
+      example: "16"
+    vintage:
+      description: Millésime de distillation
+    bottling_year:
+      description: Année de mise en bouteille
+    abv:
+      description: Degré d'alcool (% vol)
+      example: 43
+    volume_ml:
+      description: Volume en millilitres
+      example: 700
+    chill_filtered:
+      description: Non filtré à froid = false
+    natural_colour:
+      description: Couleur naturelle (non colorée) = true
+    peated:
+      description: Tourbé
+    peat_level:
+      description: "Niveau de tourbe (ex. léger, moyen, fort)"
+    ppm:
+      description: Phénols en ppm si connu
+    maturation:
+      description: Résumé de la maturation
+    cask_type:
+      description: "Type de fût (ex. First Fill Bourbon, Oloroso, PX...)"
+    cask_number:
+      description: Numéro de fût
+    finish:
+      description: Finition (cask finish)
+    maturation_years:
+      description: Durée de maturation en années
+    batch:
+      description: Numéro de lot
+    edition:
+      description: Édition
+    bottle_number:
+      description: Numéro de la bouteille (édition limitée)
+    number_of_bottles:
+      description: Nombre total de bouteilles produites
+    limited_edition:
+      description: Édition limitée
+    independent_bottler:
+      description: Mise en bouteille indépendante (hors distillerie d'origine)
+    tasting_notes:
+      description: Notes de dégustation générales
+    nose_notes:
+      description: Notes de nez
+    palate_notes:
+      description: Notes de bouche
+    finish_notes:
+      description: Notes de finale
+    whiskybase_id:
+      description: Identifiant Whiskybase (optionnel, jamais consulté automatiquement)
+    whiskybase_url:
+      description: Lien Whiskybase (optionnel, jamais consulté automatiquement)
+    image_url:
+      description: URL de la photo
+    label_image_url:
+      description: URL de la photo d'étiquette
+    price:
+      description: Prix d'achat
+    current_value:
+      description: Valeur actuelle estimée
+    currency:
+      description: Devise (par défaut EUR)
+    purchase_date:
+      description: Date d'achat (YYYY-MM-DD)
+    purchase_location:
+      description: Lieu d'achat
+    storage_location:
+      description: Emplacement de rangement en texte libre (en plus du placement étagère)
+    notes:
+      description: Notes personnelles
+    favorite:
+      description: Coup de cœur
+    rating:
+      description: Note personnelle /5
+    barcode:
+      description: Code-barres
+    external_id:
+      description: Identifiant externe (autre base de données)
+    external_url:
+      description: Lien externe
+
+update_whisky:
+  name: Modifier un whisky
+  description: Modifie les informations d'une fiche whisky existante (mêmes champs que add_whisky, hors placement).
+  fields:
+    whisky_id:
+      description: ID du whisky
+      required: true
+    name:
+      description: Nouveau nom
+    distillery:
+      description: Distillerie
+    bottler:
+      description: Embouteilleur indépendant
+    brand:
+      description: Marque commerciale
+    expression:
+      description: Expression / cuvée
+    country:
+      description: Pays
+    region:
+      description: Région
+    whisky_type:
+      description: Type de whisky
+    age:
+      description: Âge
+    abv:
+      description: Degré d'alcool
+    cask_type:
+      description: Type de fût
+    finish:
+      description: Finition
+    tasting_notes:
+      description: Notes de dégustation
+    price:
+      description: Prix d'achat
+    current_value:
+      description: Valeur actuelle estimée
+    favorite:
+      description: Coup de cœur
+    rating:
+      description: Note personnelle /5
+
+remove_whisky:
+  name: Retirer un whisky
+  description: Retire une fiche whisky de la collection avec TOUS ses emplacements.
+  fields:
+    whisky_id:
+      description: ID du whisky
+      required: true
+
+add_slot:
+  name: Ajouter un exemplaire
+  description: Ajoute une bouteille physique supplémentaire à un whisky existant.
+  fields:
+    whisky_id:
+      description: ID du whisky
+      required: true
+    rack_id:
+      description: ID de l'étagère
+    slot:
+      description: Numéro d'emplacement
+    comment:
+      description: Commentaire libre sur cet exemplaire
+    size:
+      description: Format de la bouteille
+
+update_slot:
+  name: Modifier un exemplaire
+  description: Modifie le format ou le commentaire d'une bouteille physique.
+  fields:
+    whisky_id:
+      description: ID du whisky
+      required: true
+    slot_idx:
+      description: Index de l'exemplaire dans la liste des emplacements
+      required: true
+    size:
+      description: Format de la bouteille
+    comment:
+      description: Commentaire libre
+
+move_slot:
+  name: Déplacer un exemplaire
+  description: Déplace une bouteille physique vers une autre étagère/emplacement.
+  fields:
+    whisky_id:
+      description: ID du whisky
+      required: true
+    slot_idx:
+      description: Index de l'exemplaire à déplacer
+      required: true
+    rack_id:
+      description: ID de l'étagère de destination
+      required: true
+    slot:
+      description: Numéro d'emplacement de destination
+      required: true
+
+remove_slot:
+  name: Retirer un exemplaire
+  description: >-
+    Retire UN exemplaire sans changer son statut (pas un service de
+    consommation — utilisez open_bottle/finish_bottle pour ça). Le whisky est
+    supprimé automatiquement s'il s'agissait de son dernier exemplaire.
+  fields:
+    whisky_id:
+      description: ID du whisky
+      required: true
+    slot_idx:
+      description: Index de l'exemplaire à retirer
+      required: true
+
+open_bottle:
+  name: Ouvrir une bouteille
+  description: Marque un exemplaire comme ouvert (sealed → opened). Déclenche l'événement whisky_bottle_opened.
+  fields:
+    whisky_id:
+      description: ID du whisky
+      required: true
+    slot_idx:
+      description: Index de l'exemplaire (défaut 0)
+      example: 0
+    opened_date:
+      description: Date d'ouverture (YYYY-MM-DD, défaut aujourd'hui)
+
+finish_bottle:
+  name: Terminer une bouteille
+  description: >-
+    Marque un exemplaire comme terminé (opened → finished). L'emplacement
+    N'EST PAS supprimé : la fiche reste consultable avec son historique.
+    Déclenche l'événement whisky_bottle_finished.
+  fields:
+    whisky_id:
+      description: ID du whisky
+      required: true
+    slot_idx:
+      description: Index de l'exemplaire (défaut 0)
+      example: 0
+    finished_date:
+      description: Date de fin (YYYY-MM-DD, défaut aujourd'hui)
+    rating:
+      description: Note personnelle /5 pour ce whisky
+    comment:
+      description: Commentaire de dégustation pour cet exemplaire
