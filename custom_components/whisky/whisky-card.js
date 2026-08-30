@@ -3,10 +3,10 @@
 // licence MIT) : même style d'architecture (Web Component vanilla, Shadow
 // DOM, rendu par template strings), vocabulaire entièrement whisky.
 //
-// Commit 9/12 : suivi du niveau restant d'une bouteille ouverte depuis la
-// fiche détail (input % + bouton "Mettre à jour", appelle le service
-// update_remaining ajouté côté backend — déclenche whisky_bottle_low au
-// franchissement du seuil bas). Le commit 8 avait posé le panneau de
+// Commit 11/12 : pas de changement fonctionnel côté carte — VERSION alignée
+// sur __init__.py/manifest.json (documentation + correction entity_id des
+// capteurs, voir README/sensor.py). Le commit 9 avait ajouté le suivi du
+// niveau restant d'une bouteille ouverte ; le commit 8, le panneau de
 // statistiques et la barre de recherche/filtres ; le commit 7, la liste
 // (tuiles) et la fiche détail ; le commit 6, le formulaire d'ajout/édition
 // et la reconnaissance photo Gemini.
@@ -15,7 +15,7 @@
 // testées avec Node (voir tests/), sans dépendre d'un navigateur ou de HA.
 
 const DOMAIN = "whisky";
-const VERSION = "0.9.0";
+const VERSION = "0.10.0";
 
 // Doit rester synchronisé avec WHISKY_TYPE_VALUES dans __init__.py.
 const WHISKY_TYPE_VALUES = [

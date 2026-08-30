@@ -1,4 +1,4 @@
-"""Capteurs Whisky — v0.9.0.
+"""Capteurs Whisky — v0.10.0.
 
 Sept capteurs globaux, conformes au brief §9 :
   sensor.whisky_total              nombre total de bouteilles (exemplaires physiques)
@@ -143,7 +143,15 @@ async def async_setup_entry(
 
 
 class WhiskyBaseSensor(SensorEntity):
-    """Capteur de base Whisky : se met à jour sur l'événement whisky_updated."""
+    """Capteur de base Whisky : se met à jour sur l'événement whisky_updated.
+
+    Chaque sous-classe fixe explicitement `self.entity_id` (en plus de
+    `_attr_unique_id`) : sans cela, Home Assistant dérive l'entity_id du nom
+    AFFICHÉ (`_attr_name`, ex. "Whisky Valeur de la collection"), pas de
+    l'unique_id — ce qui donnerait `sensor.whisky_valeur_de_la_collection`
+    au lieu de `sensor.whisky_collection_value` attendu par le brief (§9) et
+    utilisé dans toute la documentation/les automatisations d'exemple.
+    """
 
     _attr_should_poll = False
 
@@ -177,6 +185,7 @@ class WhiskyTotalSensor(WhiskyBaseSensor):
         super().__init__(*args, **kwargs)
         self._attr_unique_id = f"{DOMAIN}_total"
         self._attr_name = "Whisky Total"
+        self.entity_id = f"sensor.{self._attr_unique_id}"
 
     @property
     def native_value(self) -> int:
@@ -209,6 +218,7 @@ class WhiskyOpenedSensor(WhiskyBaseSensor):
         super().__init__(*args, **kwargs)
         self._attr_unique_id = f"{DOMAIN}_opened"
         self._attr_name = "Whisky Ouvertes"
+        self.entity_id = f"sensor.{self._attr_unique_id}"
 
     @property
     def native_value(self) -> int:
@@ -229,6 +239,7 @@ class WhiskySealedSensor(WhiskyBaseSensor):
         super().__init__(*args, **kwargs)
         self._attr_unique_id = f"{DOMAIN}_sealed"
         self._attr_name = "Whisky Scellées"
+        self.entity_id = f"sensor.{self._attr_unique_id}"
 
     @property
     def native_value(self) -> int:
@@ -245,6 +256,7 @@ class WhiskyFinishedSensor(WhiskyBaseSensor):
         super().__init__(*args, **kwargs)
         self._attr_unique_id = f"{DOMAIN}_finished"
         self._attr_name = "Whisky Terminées"
+        self.entity_id = f"sensor.{self._attr_unique_id}"
 
     @property
     def native_value(self) -> int:
@@ -260,6 +272,7 @@ class WhiskyDistilleriesSensor(WhiskyBaseSensor):
         super().__init__(*args, **kwargs)
         self._attr_unique_id = f"{DOMAIN}_distilleries"
         self._attr_name = "Whisky Distilleries"
+        self.entity_id = f"sensor.{self._attr_unique_id}"
 
     @property
     def native_value(self) -> int:
@@ -281,6 +294,7 @@ class WhiskyCollectionValueSensor(WhiskyBaseSensor):
         super().__init__(*args, **kwargs)
         self._attr_unique_id = f"{DOMAIN}_collection_value"
         self._attr_name = "Whisky Valeur de la collection"
+        self.entity_id = f"sensor.{self._attr_unique_id}"
 
     @property
     def native_value(self) -> float:
@@ -304,6 +318,7 @@ class WhiskyAverageAgeSensor(WhiskyBaseSensor):
         super().__init__(*args, **kwargs)
         self._attr_unique_id = f"{DOMAIN}_average_age"
         self._attr_name = "Whisky Âge moyen"
+        self.entity_id = f"sensor.{self._attr_unique_id}"
 
     @property
     def native_value(self) -> float:
