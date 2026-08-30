@@ -3,19 +3,18 @@
 // licence MIT) : même style d'architecture (Web Component vanilla, Shadow
 // DOM, rendu par template strings), vocabulaire entièrement whisky.
 //
-// Commit 11/12 : pas de changement fonctionnel côté carte — VERSION alignée
-// sur __init__.py/manifest.json (documentation + correction entity_id des
-// capteurs, voir README/sensor.py). Le commit 9 avait ajouté le suivi du
-// niveau restant d'une bouteille ouverte ; le commit 8, le panneau de
-// statistiques et la barre de recherche/filtres ; le commit 7, la liste
-// (tuiles) et la fiche détail ; le commit 6, le formulaire d'ajout/édition
-// et la reconnaissance photo Gemini.
+// Commit 12/12 : packaging final — VERSION 1.0.0, socle v1 complet. Pas de
+// changement fonctionnel côté carte depuis le commit 9 (suivi du niveau
+// restant) ; le commit 8 avait ajouté le panneau de statistiques et la barre
+// de recherche/filtres ; le commit 7, la liste (tuiles) et la fiche détail ;
+// le commit 6, le formulaire d'ajout/édition et la reconnaissance photo
+// Gemini.
 //
 // Les fonctions PURES (sans DOM) sont exportées en fin de fichier pour être
 // testées avec Node (voir tests/), sans dépendre d'un navigateur ou de HA.
 
 const DOMAIN = "whisky";
-const VERSION = "0.10.0";
+const VERSION = "1.0.0";
 
 // Doit rester synchronisé avec WHISKY_TYPE_VALUES dans __init__.py.
 const WHISKY_TYPE_VALUES = [

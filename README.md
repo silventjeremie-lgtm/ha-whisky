@@ -21,9 +21,20 @@ Projet indépendant, dérivé de l'architecture de [Millésime](https://github.c
 - [x] Commit 9 — Événements pour automatisations
 - [x] Commit 10 — Tests
 - [x] Commit 11 — Documentation complète
-- [ ] Commit 12 — Packaging final
+- [x] Commit 12 — Packaging final
 
 **Portée de la v1** (voir aussi Limites connues plus bas) : socle complet — modèle de données, reconnaissance photo, formulaire, liste/détail, statistiques, filtres, entités et services HA. La visualisation 3D et le sommelier IA de Millésime ne sont **pas** repris dans cette v1 (phase 2 éventuelle, non planifiée).
+
+## Avant de pousser ce dépôt sur votre GitHub
+
+Ce projet vous est livré en fichiers locaux : c'est à vous de créer le dépôt GitHub et d'y pousser ce code. Deux champs de `custom_components/whisky/manifest.json` contiennent un nom de dépôt indicatif (`jeremiesilvent/ha-whisky`) à corriger si votre dépôt porte un autre nom :
+
+```json
+"documentation": "https://github.com/<vous>/<votre-depot>",
+"issue_tracker": "https://github.com/<vous>/<votre-depot>/issues",
+```
+
+`codeowners` (`@jeremiesilvent`) peut aussi être ajusté à votre pseudo GitHub réel si différent.
 
 ## Installation
 

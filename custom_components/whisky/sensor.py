@@ -1,4 +1,4 @@
-"""Capteurs Whisky — v0.10.0.
+"""Capteurs Whisky — v1.0.0.
 
 Sept capteurs globaux, conformes au brief §9 :
   sensor.whisky_total              nombre total de bouteilles (exemplaires physiques)
