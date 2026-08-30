@@ -21,7 +21,7 @@ Projet indépendant, dérivé de l'architecture de [Millésime](https://github.c
 - [x] Commit 7 — Liste & fiche détail
 - [x] Commit 8 — Statistiques & filtres
 - [x] Commit 9 — Événements pour automatisations
-- [ ] Commit 10 — Tests
+- [x] Commit 10 — Tests
 - [ ] Commit 11 — Documentation complète
 - [ ] Commit 12 — Packaging final
 

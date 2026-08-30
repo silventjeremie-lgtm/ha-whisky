@@ -1,1 +1,2 @@
 voluptuous
+pytest>=8.0
