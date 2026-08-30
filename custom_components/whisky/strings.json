@@ -1,0 +1,40 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Whisky — Collection",
+        "description": "Bienvenue ! Configurez votre collection de whiskies.",
+        "data": {
+          "collection_name": "Nom de la collection",
+          "gemini_api_key": "Clé API Gemini (optionnelle)"
+        },
+        "data_description": {
+          "gemini_api_key": "Clé gratuite sur aistudio.google.com (compte Google requis). Cliquez Create API Key, copiez et collez ici. 1 500 requêtes/jour gratuites. Sans clé : saisie manuelle uniquement."
+        }
+      }
+    },
+    "error": {
+      "invalid_key": "Format invalide — la clé Gemini ne peut pas contenir d'espace et doit faire au moins 20 caractères"
+    },
+    "abort": {
+      "already_configured": "Whisky est déjà configuré."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Modifier la clé Gemini",
+        "description": "Mettez à jour votre clé Gemini API.",
+        "data": {
+          "gemini_api_key": "Clé API Gemini"
+        },
+        "data_description": {
+          "gemini_api_key": "Nouvelle clé sur aistudio.google.com. Laissez vide pour revenir à la saisie manuelle."
+        }
+      }
+    },
+    "error": {
+      "invalid_key": "Format invalide — la clé Gemini ne peut pas contenir d'espace et doit faire au moins 20 caractères"
+    }
+  }
+}

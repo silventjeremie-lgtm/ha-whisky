@@ -1,0 +1,20 @@
+{
+  "domain": "whisky",
+  "name": "Whisky — Collection",
+  "after_dependencies": [
+    "recorder"
+  ],
+  "codeowners": [
+    "@jeremiesilvent"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "http",
+    "websocket_api"
+  ],
+  "documentation": "https://github.com/jeremiesilvent/ha-whisky",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/jeremiesilvent/ha-whisky/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

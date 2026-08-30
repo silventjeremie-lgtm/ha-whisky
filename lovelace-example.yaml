@@ -1,0 +1,23 @@
+title: Whisky
+views:
+  - title: Ma Collection
+    path: whisky
+    icon: mdi:glass-tulip
+    cards:
+      # Carte principale Whisky
+      - type: custom:whisky-card
+
+      # Statistiques rapides
+      - type: entities
+        title: Statistiques Whisky
+        icon: mdi:chart-bar
+        entities:
+          - entity: sensor.whisky_total
+            name: Total bouteilles
+            icon: mdi:bottle-tonic
+          - entity: sensor.whisky_distilleries
+            name: Distilleries
+            icon: mdi:factory
+          - entity: sensor.whisky_collection_value
+            name: Valeur estimée
+            icon: mdi:currency-eur
