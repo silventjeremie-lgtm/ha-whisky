@@ -3,16 +3,17 @@
 // licence MIT) : même style d'architecture (Web Component vanilla, Shadow
 // DOM, rendu par template strings), vocabulaire entièrement whisky.
 //
-// Commit 6/12 : formulaire d'ajout/édition complet (9 sections) + intégration
-// de la reconnaissance photo Gemini, avec écran de validation utilisateur
-// avant tout enregistrement (brief §3). La liste/fiche détail arrivent au
-// commit 7, les statistiques/filtres au commit 8.
+// Commit 7/12 : liste (tuiles) + fiche détail whisky (statuts par exemplaire,
+// actions ouvrir/terminer/retirer/ajouter un exemplaire, édition, suppression).
+// Le commit 6 avait posé le formulaire d'ajout/édition complet (9 sections) +
+// la reconnaissance photo Gemini avec validation utilisateur (brief §3).
+// Les statistiques/filtres arrivent au commit 8.
 //
 // Les fonctions PURES (sans DOM) sont exportées en fin de fichier pour être
 // testées avec Node (voir tests/), sans dépendre d'un navigateur ou de HA.
 
 const DOMAIN = "whisky";
-const VERSION = "0.6.0";
+const VERSION = "0.7.0";
 
 // Doit rester synchronisé avec WHISKY_TYPE_VALUES dans __init__.py.
 const WHISKY_TYPE_VALUES = [
@@ -250,6 +251,88 @@ function applyRecognitionSelection(currentValues, result, selectedKeys) {
   return next;
 }
 
+// ── Fonctions pures : liste & fiche détail (commit 7) ───────────────────────
+
+function escapeHtml(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
+const STATUS_ORDER = ["sealed", "opened", "finished"];
+const STATUS_DOT = { sealed: "●", opened: "◐", finished: "○" };
+
+/** {sealed: n, opened: n, finished: n} à partir des emplacements d'une fiche. */
+function statusBreakdown(slots) {
+  const counts = { sealed: 0, opened: 0, finished: 0 };
+  for (const s of slots || []) {
+    const st = counts.hasOwnProperty(s.bottle_status) ? s.bottle_status : "sealed";
+    counts[st] += 1;
+  }
+  return counts;
+}
+
+/** Résumé court des statuts pour l'affichage tuile, ex. "2 scellées · 1 ouverte". */
+function statusSummary(slots) {
+  const counts = statusBreakdown(slots);
+  const labels = { sealed: "scellée", opened: "ouverte", finished: "terminée" };
+  return STATUS_ORDER.filter((k) => counts[k] > 0)
+    .map((k) => `${STATUS_DOT[k]} ${counts[k]} ${labels[k]}${counts[k] > 1 ? "s" : ""}`)
+    .join(" · ") || "aucune bouteille";
+}
+
+/** "★★★★☆" pour une note 0-5 (arrondie à l'entier le plus proche pour l'affichage). */
+function ratingStars(rating) {
+  const n = Math.max(0, Math.min(5, Math.round(Number(rating) || 0)));
+  return "★".repeat(n) + "☆".repeat(5 - n);
+}
+
+/** Ligne "Islay · Single Malt" / "16 ans · 43 %" pour la tuile, en omettant les champs absents. */
+function metaLine(parts) {
+  return parts.filter((p) => p !== null && p !== undefined && String(p).trim() !== "").join(" · ");
+}
+
+function tileHTML(w) {
+  const meta = w.whisky_meta || {};
+  const line1 = metaLine([meta.region || meta.country, meta.whisky_type]);
+  const line2 = metaLine([meta.age ? `${meta.age} ans` : null, meta.abv ? `${meta.abv} %` : null]);
+  const img = w.image_url
+    ? `<img class="wc-tile-img" src="${escapeHtml(w.image_url)}" alt="" />`
+    : `<div class="wc-tile-img wc-tile-img-placeholder">🥃</div>`;
+  return `
+    <div class="wc-tile" data-whisky-id="${escapeHtml(w.id)}">
+      ${img}
+      <div class="wc-tile-body">
+        <div class="wc-tile-name">${w.favorite ? "★ " : ""}${escapeHtml(w.name)}</div>
+        ${meta.expression ? `<div class="wc-tile-sub">${escapeHtml(meta.expression)}</div>` : ""}
+        ${line1 ? `<div class="wc-tile-sub">${escapeHtml(line1)}</div>` : ""}
+        ${line2 ? `<div class="wc-tile-sub">${escapeHtml(line2)}</div>` : ""}
+        <div class="wc-tile-status">${escapeHtml(statusSummary(w.slots))}</div>
+        ${w.rating ? `<div class="wc-tile-rating">${ratingStars(w.rating)}</div>` : ""}
+      </div>
+    </div>`;
+}
+
+/** Regroupe les champs whisky_meta en lignes label/valeur par section détail (commit 6/7 partagent FORM_SECTIONS). */
+function detailRows(w) {
+  const meta = w.whisky_meta || {};
+  const get = (k) => (k in w ? w[k] : meta[k]);
+  return FORM_SECTIONS
+    .filter((s) => s.key !== "tasting")  // la dégustation a sa propre mise en page (texte long)
+    .map((s) => ({
+      title: s.title,
+      rows: s.fields
+        .map((f) => {
+          let v = get(f.key);
+          if (f.type === "tri") v = v === true ? "Oui" : v === false ? "Non" : "";
+          if (f.type === "checkbox") v = v ? "Oui" : "";
+          return { label: f.label.replace(" *", ""), value: v };
+        })
+        .filter((r) => r.value !== "" && r.value !== null && r.value !== undefined),
+    }))
+    .filter((s) => s.rows.length > 0);
+}
+
 // ── Composant carte ───────────────────────────────────────────────────────
 
 class WhiskyCard extends HTMLElement {
@@ -304,11 +387,14 @@ class WhiskyCard extends HTMLElement {
     this._render();
   }
 
-  // ── Rendu principal (squelette — la vraie liste arrive au commit 7) ──────
+  // ── Rendu principal : liste des fiches ────────────────────────────────────
 
   _render() {
     const whiskies = (this._data && this._data.whiskies) || [];
     const total = whiskies.reduce((n, w) => n + ((w.slots && w.slots.length) || 0), 0);
+    const tiles = whiskies.length
+      ? `<div class="wc-grid-tiles">${whiskies.map((w) => tileHTML(w)).join("")}</div>`
+      : `<div class="wc-empty">Aucun whisky pour l'instant — cliquez sur ➕ Ajouter pour commencer votre collection.</div>`;
     this.shadowRoot.innerHTML = `
       <style>${CARD_CSS}</style>
       <div class="wc-card">
@@ -316,11 +402,18 @@ class WhiskyCard extends HTMLElement {
           <div class="wc-title">🥃 Whisky — Collection</div>
           <button class="wc-btn wc-btn-primary" id="wc-add">➕ Ajouter</button>
         </div>
-        <div class="wc-hint">${whiskies.length} fiche(s), ${total} bouteille(s) — vue liste et statistiques à venir (commits 7-8).</div>
+        <div class="wc-hint">${whiskies.length} fiche(s), ${total} bouteille(s)</div>
+        ${tiles}
       </div>
     `;
     const addBtn = this.shadowRoot.getElementById("wc-add");
     if (addBtn) addBtn.addEventListener("click", () => this._openForm(null));
+    this.shadowRoot.querySelectorAll("[data-whisky-id]").forEach((el) => {
+      el.addEventListener("click", () => {
+        const w = whiskies.find((x) => x.id === el.dataset.whiskyId);
+        if (w) this._openDetail(w);
+      });
+    });
   }
 
   // ── Modale (hors shadow root, comme Millésime — un formulaire doit rester
@@ -339,6 +432,137 @@ class WhiskyCard extends HTMLElement {
 
   _closeModal() {
     if (this._overlay) { this._overlay.remove(); this._overlay = null; }
+  }
+
+  // ── Fiche détail ───────────────────────────────────────────────────────────
+
+  _openDetail(w) {
+    const box = this._openModal(this._detailHTML(w));
+    this._bindDetail(box, w);
+  }
+
+  _detailHTML(w) {
+    const meta = w.whisky_meta || {};
+    const sections = detailRows(w);
+    const img = w.image_url
+      ? `<img class="wc-detail-img" src="${escapeHtml(w.image_url)}" alt="" />`
+      : "";
+    const slotsHTML = (w.slots || []).map((s, idx) => {
+      const place = s.rack_id
+        ? `Étagère ${escapeHtml(s.rack_id)} · emplacement ${Number(s.slot) + 1}`
+        : "Non placée";
+      const status = s.bottle_status || "sealed";
+      const extra = [];
+      if (status === "opened" && s.opened_date) extra.push(`ouverte le ${escapeHtml(s.opened_date)}`);
+      if (status === "finished" && s.finished_date) extra.push(`terminée le ${escapeHtml(s.finished_date)}`);
+      if (s.comment) extra.push(escapeHtml(s.comment));
+      const actions = [];
+      if (status === "sealed") actions.push(`<button type="button" class="wc-btn wc-slot-open" data-idx="${idx}">Ouvrir</button>`);
+      if (status === "opened") actions.push(`<button type="button" class="wc-btn wc-slot-finish" data-idx="${idx}">Terminer</button>`);
+      actions.push(`<button type="button" class="wc-btn wc-slot-remove" data-idx="${idx}">Retirer</button>`);
+      return `
+        <div class="wc-slot-row">
+          <span class="wc-slot-dot">${STATUS_DOT[status] || "●"}</span>
+          <span class="wc-slot-place">${place}</span>
+          <span class="wc-slot-status">${escapeHtml(BOTTLE_STATUS_LABELS[status] || status)}${extra.length ? " · " + extra.join(" · ") : ""}</span>
+          <span class="wc-slot-actions">${actions.join("")}</span>
+        </div>`;
+    }).join("") || `<div class="wc-slot-row wc-slot-empty">Aucun exemplaire.</div>`;
+
+    const tastingFields = [
+      ["Notes générales", meta.tasting_notes], ["Nez", meta.nose_notes],
+      ["Bouche", meta.palate_notes], ["Finale", meta.finish_notes],
+    ].filter(([, v]) => v);
+    const tastingHTML = tastingFields.length
+      ? `<fieldset class="wc-section"><legend>👃 Dégustation</legend>
+          ${tastingFields.map(([l, v]) => `<div class="wc-detail-row"><span class="wc-detail-label">${l}</span><span class="wc-detail-value">${escapeHtml(v)}</span></div>`).join("")}
+        </fieldset>`
+      : "";
+
+    const sectionsHTML = sections.map((s) => `
+      <fieldset class="wc-section">
+        <legend>${s.title}</legend>
+        ${s.rows.map((r) => `<div class="wc-detail-row"><span class="wc-detail-label">${escapeHtml(r.label)}</span><span class="wc-detail-value">${escapeHtml(r.value)}</span></div>`).join("")}
+      </fieldset>
+    `).join("");
+
+    return `
+      <div class="wc-detail-header">
+        <h2 class="wc-modal-title">${w.favorite ? "★ " : ""}${escapeHtml(w.name)}</h2>
+        <div class="wc-detail-actions">
+          <button type="button" class="wc-btn" id="wc-detail-edit">✏️ Modifier</button>
+          <button type="button" class="wc-btn" id="wc-detail-delete">🗑️ Supprimer</button>
+        </div>
+      </div>
+      ${img}
+      <div class="wc-slot-summary">${escapeHtml(statusSummary(w.slots))}</div>
+      <div class="wc-slots">${slotsHTML}</div>
+      <button type="button" class="wc-btn" id="wc-detail-add-slot">➕ Ajouter un exemplaire</button>
+      ${sectionsHTML}
+      ${tastingHTML}
+    `;
+  }
+
+  _bindDetail(box, w) {
+    const refresh = async () => {
+      await this._fetchData();
+      const updated = (this._data.whiskies || []).find((x) => x.id === w.id);
+      if (!updated) { this._closeModal(); return; }
+      box.innerHTML = this._detailHTML(updated);
+      this._bindDetail(box, updated);
+    };
+    box.querySelector("#wc-detail-edit").addEventListener("click", () => {
+      this._closeModal();
+      this._openForm(w);
+    });
+    box.querySelector("#wc-detail-delete").addEventListener("click", async () => {
+      if (!confirm(`Supprimer définitivement « ${w.name} » et tous ses exemplaires ?`)) return;
+      try {
+        await this._hass.callService(DOMAIN, "remove_whisky", { whisky_id: w.id });
+        this._closeModal();
+      } catch (err) {
+        this._toast(box, `Erreur : ${(err && err.message) || err}`);
+      }
+    });
+    box.querySelector("#wc-detail-add-slot").addEventListener("click", async () => {
+      try {
+        await this._hass.callService(DOMAIN, "add_slot", { whisky_id: w.id });
+        await refresh();
+      } catch (err) {
+        this._toast(box, `Erreur : ${(err && err.message) || err}`);
+      }
+    });
+    box.querySelectorAll(".wc-slot-open").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        try {
+          await this._hass.callService(DOMAIN, "open_bottle", { whisky_id: w.id, slot_idx: Number(btn.dataset.idx) });
+          await refresh();
+        } catch (err) {
+          this._toast(box, `Erreur : ${(err && err.message) || err}`);
+        }
+      });
+    });
+    box.querySelectorAll(".wc-slot-finish").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        try {
+          await this._hass.callService(DOMAIN, "finish_bottle", { whisky_id: w.id, slot_idx: Number(btn.dataset.idx) });
+          await refresh();
+        } catch (err) {
+          this._toast(box, `Erreur : ${(err && err.message) || err}`);
+        }
+      });
+    });
+    box.querySelectorAll(".wc-slot-remove").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        if (!confirm("Retirer cet exemplaire ?")) return;
+        try {
+          await this._hass.callService(DOMAIN, "remove_slot", { whisky_id: w.id, slot_idx: Number(btn.dataset.idx) });
+          await refresh();
+        } catch (err) {
+          this._toast(box, `Erreur : ${(err && err.message) || err}`);
+        }
+      });
+    });
   }
 
   // ── Formulaire d'ajout / édition ─────────────────────────────────────────
@@ -563,6 +787,26 @@ const CARD_CSS = `
     color: var(--primary-text-color, #000); border-radius: 8px; padding: 8px 14px; cursor: pointer; font-size: .95em;
   }
   .wc-btn-primary { background: var(--primary-color, #7B1D2E); color: #fff; border-color: transparent; }
+  .wc-empty { opacity: .7; padding: 24px 8px; text-align: center; font-size: .95em; }
+  .wc-grid-tiles {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; margin-top: 14px;
+  }
+  @container (max-width: 380px) {
+    .wc-grid-tiles { grid-template-columns: 1fr; }
+  }
+  .wc-tile {
+    display: flex; flex-direction: column; border: 1px solid var(--divider-color, #ddd); border-radius: 10px;
+    overflow: hidden; cursor: pointer; background: var(--secondary-background-color, #fafafa);
+    transition: box-shadow .15s ease, transform .15s ease;
+  }
+  .wc-tile:hover { box-shadow: 0 2px 10px rgba(0,0,0,.15); transform: translateY(-1px); }
+  .wc-tile-img { width: 100%; height: 120px; object-fit: cover; display: block; background: var(--divider-color, #eee); }
+  .wc-tile-img-placeholder { display: flex; align-items: center; justify-content: center; font-size: 2.4em; }
+  .wc-tile-body { padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 2px; }
+  .wc-tile-name { font-weight: 600; font-size: .95em; }
+  .wc-tile-sub { font-size: .82em; opacity: .75; }
+  .wc-tile-status { font-size: .78em; opacity: .8; margin-top: 4px; }
+  .wc-tile-rating { font-size: .85em; color: var(--primary-color, #7B1D2E); margin-top: 2px; }
 `;
 
 const MODAL_CSS = `
@@ -602,6 +846,23 @@ const MODAL_CSS = `
     position: fixed; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center;
     z-index: 1000; padding: 16px;
   }
+  .wc-detail-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .wc-detail-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .wc-detail-img { width: 100%; max-height: 220px; object-fit: cover; border-radius: 10px; margin: 10px 0; display: block; }
+  .wc-slot-summary { opacity: .8; font-size: .9em; margin: 6px 0; }
+  .wc-slots { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+  .wc-slot-row {
+    display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px;
+    border: 1px solid var(--divider-color, #ddd); border-radius: 8px; padding: 6px 10px; font-size: .85em;
+  }
+  .wc-slot-row.wc-slot-empty { grid-template-columns: 1fr; opacity: .7; }
+  .wc-slot-place { grid-column: 2; }
+  .wc-slot-status { grid-column: 1 / -1; opacity: .75; font-size: .92em; }
+  .wc-slot-actions { grid-column: 3; display: flex; gap: 6px; flex-wrap: wrap; justify-self: end; }
+  .wc-slot-actions .wc-btn { padding: 4px 10px; font-size: .85em; }
+  .wc-detail-row { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; font-size: .88em; }
+  .wc-detail-label { opacity: .7; }
+  .wc-detail-value { text-align: right; }
 `;
 
 if (typeof customElements !== "undefined") {
@@ -621,5 +882,7 @@ if (typeof module !== "undefined" && module.exports) {
     triStateToPayload, triStateFromValue, numberOrUndefined,
     buildWhiskyPayload, confidenceTier, recognitionFieldList,
     applyRecognitionSelection, FORM_SECTIONS, CREATE_ONLY_SECTION,
+    escapeHtml, STATUS_ORDER, STATUS_DOT, statusBreakdown, statusSummary,
+    ratingStars, metaLine, tileHTML, detailRows,
   };
 }
