@@ -3,17 +3,18 @@
 // licence MIT) : même style d'architecture (Web Component vanilla, Shadow
 // DOM, rendu par template strings), vocabulaire entièrement whisky.
 //
-// Commit 7/12 : liste (tuiles) + fiche détail whisky (statuts par exemplaire,
-// actions ouvrir/terminer/retirer/ajouter un exemplaire, édition, suppression).
-// Le commit 6 avait posé le formulaire d'ajout/édition complet (9 sections) +
-// la reconnaissance photo Gemini avec validation utilisateur (brief §3).
-// Les statistiques/filtres arrivent au commit 8.
+// Commit 8/12 : panneau de statistiques (totaux, statuts, valeur du stock,
+// âge moyen, répartitions pays/région/distillerie/type/tourbe — miroir des
+// capteurs sensor.py, recalculé côté carte) + barre de recherche/filtres
+// (texte libre, type, statut, coups de cœur) au-dessus de la grille de
+// tuiles. Le commit 7 avait posé la liste (tuiles) et la fiche détail ; le
+// commit 6, le formulaire d'ajout/édition et la reconnaissance photo Gemini.
 //
 // Les fonctions PURES (sans DOM) sont exportées en fin de fichier pour être
 // testées avec Node (voir tests/), sans dépendre d'un navigateur ou de HA.
 
 const DOMAIN = "whisky";
-const VERSION = "0.7.0";
+const VERSION = "0.8.0";
 
 // Doit rester synchronisé avec WHISKY_TYPE_VALUES dans __init__.py.
 const WHISKY_TYPE_VALUES = [
@@ -333,6 +334,108 @@ function detailRows(w) {
     .filter((s) => s.rows.length > 0);
 }
 
+// ── Fonctions pures : recherche, filtres & statistiques (commit 8) ─────────
+
+/** Vrai si le texte libre `q` correspond à un champ identitaire de la fiche. */
+function matchesQuery(w, q) {
+  const needle = String(q || "").trim().toLowerCase();
+  if (!needle) return true;
+  const meta = w.whisky_meta || {};
+  const haystack = [w.name, meta.distillery, meta.bottler, meta.brand, meta.expression, meta.region, meta.country]
+    .filter((v) => v !== null && v !== undefined && v !== "")
+    .join(" ")
+    .toLowerCase();
+  return haystack.includes(needle);
+}
+
+/** Vrai si la fiche possède au moins un exemplaire dans le statut demandé (ou si aucun statut n'est demandé). */
+function matchesStatusFilter(w, status) {
+  if (!status) return true;
+  return (w.slots || []).some((s) => (s.bottle_status || "sealed") === status);
+}
+
+/**
+ * Filtre la liste des fiches whisky selon {q, whisky_type, status, favorite}.
+ * Filtre purement côté client (les données sont déjà toutes chargées en
+ * mémoire via whisky/get_data) — aucun filtre non renseigné n'exclut rien.
+ */
+function filterWhiskies(whiskies, filters) {
+  const f = filters || {};
+  return (whiskies || []).filter((w) => {
+    if (f.favorite && !w.favorite) return false;
+    if (f.whisky_type && ((w.whisky_meta || {}).whisky_type || "") !== f.whisky_type) return false;
+    if (!matchesStatusFilter(w, f.status)) return false;
+    if (!matchesQuery(w, f.q)) return false;
+    return true;
+  });
+}
+
+/** Répartition {clé -> nombre de bouteilles} triée par fréquence décroissante (miroir de sensor.py _breakdown). */
+function breakdownJS(whiskies, keyFn) {
+  const counts = {};
+  for (const w of whiskies || []) {
+    const key = keyFn(w);
+    if (!key) continue;
+    const n = (w.slots || []).length;
+    counts[key] = (counts[key] || 0) + n;
+  }
+  return Object.entries(counts).sort((a, b) => b[1] - a[1]);
+}
+
+/**
+ * Statistiques agrégées de la collection (ou d'un sous-ensemble filtré) —
+ * mêmes définitions que les capteurs HA (sensor.py), recalculées côté carte
+ * pour permettre un panneau de statistiques sans dépendre d'entités HA
+ * exposées sur un tableau de bord.
+ */
+function computeStats(whiskies) {
+  const list = whiskies || [];
+  const allSlots = list.flatMap((w) => w.slots || []);
+  const countByStatus = (status) => allSlots.filter((s) => (s.bottle_status || "sealed") === status).length;
+  const distilleries = new Set(
+    list.map((w) => ((w.whisky_meta || {}).distillery || "").trim().toLowerCase()).filter(Boolean)
+  );
+  let value = 0;
+  for (const w of list) {
+    const unit = Number(w.current_value) || Number(w.price) || 0;
+    if (unit <= 0) continue;
+    const n = (w.slots || []).filter((s) => (s.bottle_status || "sealed") !== "finished").length;
+    value += unit * n;
+  }
+  const ages = [];
+  for (const w of list) {
+    const raw = (w.whisky_meta || {}).age;
+    const age = Number(String(raw === null || raw === undefined ? "" : raw).trim().replace(",", "."));
+    if (Number.isFinite(age) && age > 0) ages.push(age);
+  }
+  const avgAge = ages.length ? ages.reduce((a, b) => a + b, 0) / ages.length : 0;
+  return {
+    total: allSlots.length,
+    references: list.length,
+    sealed: countByStatus("sealed"),
+    opened: countByStatus("opened"),
+    finished: countByStatus("finished"),
+    distilleries: distilleries.size,
+    collectionValue: Math.round(value * 100) / 100,
+    averageAge: Math.round(avgAge * 10) / 10,
+    byCountry: breakdownJS(list, (w) => (w.whisky_meta || {}).country),
+    byRegion: breakdownJS(list, (w) => (w.whisky_meta || {}).region),
+    byDistillery: breakdownJS(list, (w) => (w.whisky_meta || {}).distillery),
+    byType: breakdownJS(list, (w) => (w.whisky_meta || {}).whisky_type),
+    byPeat: breakdownJS(list, (w) => {
+      const p = (w.whisky_meta || {}).peated;
+      return p === true ? "Tourbé" : p === false ? "Non tourbé" : null;
+    }),
+  };
+}
+
+/** Réduit une répartition [ [label, count], ... ] aux `limit` premières entrées avec un pourcentage de barre relatif au maximum affiché. */
+function topBreakdown(entries, limit = 8) {
+  const top = (entries || []).slice(0, limit);
+  const max = top.reduce((m, [, n]) => Math.max(m, n), 0) || 1;
+  return top.map(([label, count]) => ({ label, count, pct: Math.round((count / max) * 100) }));
+}
+
 // ── Composant carte ───────────────────────────────────────────────────────
 
 class WhiskyCard extends HTMLElement {
@@ -340,6 +443,7 @@ class WhiskyCard extends HTMLElement {
     super();
     this.attachShadow({ mode: "open" });
     this._data = { cellars: [], whiskies: [], tasting_log: [] };
+    this._filters = { q: "", whisky_type: "", status: "", favorite: false };
   }
 
   setConfig(config) {
@@ -387,33 +491,134 @@ class WhiskyCard extends HTMLElement {
     this._render();
   }
 
-  // ── Rendu principal : liste des fiches ────────────────────────────────────
+  // ── Rendu principal : recherche/filtres + liste des fiches ────────────────
 
   _render() {
-    const whiskies = (this._data && this._data.whiskies) || [];
+    const root = this.shadowRoot;
+
+    // Préserve le focus/la sélection d'un champ de la barre d'outils (ex. la
+    // recherche) à travers le innerHTML complet ci-dessous — sans ça, chaque
+    // frappe au clavier ferait perdre le focus du champ de recherche.
+    const active = root.activeElement;
+    const activeId = active && active.id;
+    const selStart = active && typeof active.selectionStart === "number" ? active.selectionStart : null;
+    const selEnd = active && typeof active.selectionEnd === "number" ? active.selectionEnd : null;
+
+    const allWhiskies = (this._data && this._data.whiskies) || [];
+    const filters = this._filters;
+    const whiskies = filterWhiskies(allWhiskies, filters);
     const total = whiskies.reduce((n, w) => n + ((w.slots && w.slots.length) || 0), 0);
-    const tiles = whiskies.length
-      ? `<div class="wc-grid-tiles">${whiskies.map((w) => tileHTML(w)).join("")}</div>`
-      : `<div class="wc-empty">Aucun whisky pour l'instant — cliquez sur ➕ Ajouter pour commencer votre collection.</div>`;
-    this.shadowRoot.innerHTML = `
+    const filtered = whiskies.length !== allWhiskies.length;
+    const hint = filtered
+      ? `${whiskies.length} fiche(s) affichée(s) sur ${allWhiskies.length} (${total} bouteille(s))`
+      : `${whiskies.length} fiche(s), ${total} bouteille(s)`;
+    const tiles = allWhiskies.length === 0
+      ? `<div class="wc-empty">Aucun whisky pour l'instant — cliquez sur ➕ Ajouter pour commencer votre collection.</div>`
+      : whiskies.length
+        ? `<div class="wc-grid-tiles">${whiskies.map((w) => tileHTML(w)).join("")}</div>`
+        : `<div class="wc-empty">Aucune fiche ne correspond à ces filtres.</div>`;
+
+    const typeOptions = WHISKY_TYPE_VALUES.map((t) =>
+      `<option value="${t}" ${filters.whisky_type === t ? "selected" : ""}>${t}</option>`).join("");
+    const statusOptions = STATUS_ORDER.map((s) =>
+      `<option value="${s}" ${filters.status === s ? "selected" : ""}>${BOTTLE_STATUS_LABELS[s]}</option>`).join("");
+
+    root.innerHTML = `
       <style>${CARD_CSS}</style>
       <div class="wc-card">
         <div class="wc-header">
           <div class="wc-title">🥃 Whisky — Collection</div>
-          <button class="wc-btn wc-btn-primary" id="wc-add">➕ Ajouter</button>
+          <div class="wc-header-actions">
+            <button class="wc-btn" id="wc-stats-btn">📊 Statistiques</button>
+            <button class="wc-btn wc-btn-primary" id="wc-add">➕ Ajouter</button>
+          </div>
         </div>
-        <div class="wc-hint">${whiskies.length} fiche(s), ${total} bouteille(s)</div>
+        <div class="wc-toolbar">
+          <input type="search" id="wc-search" class="wc-search" placeholder="🔎 Nom, distillerie, région…" value="${escapeHtml(filters.q)}" />
+          <select id="wc-filter-type"><option value="">Tous les types</option>${typeOptions}</select>
+          <select id="wc-filter-status"><option value="">Tous statuts</option>${statusOptions}</select>
+          <label class="wc-filter-fav"><input type="checkbox" id="wc-filter-fav" ${filters.favorite ? "checked" : ""} /> Coups de cœur</label>
+        </div>
+        <div class="wc-hint">${hint}</div>
         ${tiles}
       </div>
     `;
-    const addBtn = this.shadowRoot.getElementById("wc-add");
+
+    const addBtn = root.getElementById("wc-add");
     if (addBtn) addBtn.addEventListener("click", () => this._openForm(null));
-    this.shadowRoot.querySelectorAll("[data-whisky-id]").forEach((el) => {
+    const statsBtn = root.getElementById("wc-stats-btn");
+    if (statsBtn) statsBtn.addEventListener("click", () => this._openStats());
+    root.querySelectorAll("[data-whisky-id]").forEach((el) => {
       el.addEventListener("click", () => {
         const w = whiskies.find((x) => x.id === el.dataset.whiskyId);
         if (w) this._openDetail(w);
       });
     });
+
+    const searchEl = root.getElementById("wc-search");
+    if (searchEl) searchEl.addEventListener("input", (e) => { this._filters.q = e.target.value; this._render(); });
+    const typeEl = root.getElementById("wc-filter-type");
+    if (typeEl) typeEl.addEventListener("change", (e) => { this._filters.whisky_type = e.target.value; this._render(); });
+    const statusEl = root.getElementById("wc-filter-status");
+    if (statusEl) statusEl.addEventListener("change", (e) => { this._filters.status = e.target.value; this._render(); });
+    const favEl = root.getElementById("wc-filter-fav");
+    if (favEl) favEl.addEventListener("change", (e) => { this._filters.favorite = e.target.checked; this._render(); });
+
+    if (activeId) {
+      const el = root.getElementById(activeId);
+      if (el) {
+        el.focus();
+        if (selStart !== null && el.setSelectionRange) {
+          try { el.setSelectionRange(selStart, selEnd); } catch (e) { /* type d'input sans sélection (ex. number) */ }
+        }
+      }
+    }
+  }
+
+  // ── Statistiques (commit 8) ────────────────────────────────────────────────
+
+  _openStats() {
+    const box = this._openModal(this._statsHTML());
+    const closeBtn = box.querySelector("#wc-stats-close");
+    if (closeBtn) closeBtn.addEventListener("click", () => this._closeModal());
+  }
+
+  _statsHTML() {
+    const allWhiskies = (this._data && this._data.whiskies) || [];
+    const s = computeStats(allWhiskies);
+    const barsBlock = (title, entries) => {
+      const top = topBreakdown(entries, 8);
+      if (!top.length) return "";
+      return `
+        <fieldset class="wc-section">
+          <legend>${escapeHtml(title)}</legend>
+          ${top.map((e) => `
+            <div class="wc-stat-bar-row">
+              <span class="wc-stat-bar-label">${escapeHtml(e.label)}</span>
+              <span class="wc-stat-bar-track"><span class="wc-stat-bar-fill" style="width:${e.pct}%"></span></span>
+              <span class="wc-stat-bar-count">${e.count}</span>
+            </div>`).join("")}
+        </fieldset>`;
+    };
+    return `
+      <h2 class="wc-modal-title">📊 Statistiques de la collection</h2>
+      <div class="wc-stat-grid">
+        <div class="wc-stat-tile"><div class="wc-stat-num">${s.total}</div><div class="wc-stat-label">Bouteilles</div></div>
+        <div class="wc-stat-tile"><div class="wc-stat-num">${s.references}</div><div class="wc-stat-label">Fiches</div></div>
+        <div class="wc-stat-tile"><div class="wc-stat-num">${s.sealed}</div><div class="wc-stat-label">Scellées</div></div>
+        <div class="wc-stat-tile"><div class="wc-stat-num">${s.opened}</div><div class="wc-stat-label">Ouvertes</div></div>
+        <div class="wc-stat-tile"><div class="wc-stat-num">${s.finished}</div><div class="wc-stat-label">Terminées</div></div>
+        <div class="wc-stat-tile"><div class="wc-stat-num">${s.distilleries}</div><div class="wc-stat-label">Distilleries</div></div>
+        <div class="wc-stat-tile"><div class="wc-stat-num">${s.collectionValue} €</div><div class="wc-stat-label">Valeur (stock restant)</div></div>
+        <div class="wc-stat-tile"><div class="wc-stat-num">${s.averageAge || "—"}</div><div class="wc-stat-label">Âge moyen (ans)</div></div>
+      </div>
+      ${barsBlock("Par pays", s.byCountry)}
+      ${barsBlock("Par région", s.byRegion)}
+      ${barsBlock("Par distillerie", s.byDistillery)}
+      ${barsBlock("Par type", s.byType)}
+      ${barsBlock("Tourbe", s.byPeat)}
+      <div class="wc-actions"><button type="button" class="wc-btn" id="wc-stats-close">Fermer</button></div>
+    `;
   }
 
   // ── Modale (hors shadow root, comme Millésime — un formulaire doit rester
@@ -779,7 +984,8 @@ const CARD_CSS = `
     font-family: var(--paper-font-body1_-_font-family, sans-serif);
     container-type: inline-size;
   }
-  .wc-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .wc-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  .wc-header-actions { display: flex; gap: 8px; flex-wrap: wrap; }
   .wc-title { font-size: 1.15em; font-weight: 700; }
   .wc-hint { opacity: .75; font-size: .9em; margin-top: 8px; }
   .wc-btn {
@@ -787,6 +993,13 @@ const CARD_CSS = `
     color: var(--primary-text-color, #000); border-radius: 8px; padding: 8px 14px; cursor: pointer; font-size: .95em;
   }
   .wc-btn-primary { background: var(--primary-color, #7B1D2E); color: #fff; border-color: transparent; }
+  .wc-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  .wc-toolbar .wc-search { flex: 1 1 200px; }
+  .wc-toolbar input, .wc-toolbar select {
+    border: 1px solid var(--divider-color, #ccc); border-radius: 8px; padding: 6px 10px; font: inherit;
+    background: var(--card-background-color, #fff); color: inherit;
+  }
+  .wc-filter-fav { display: flex; align-items: center; gap: 6px; font-size: .9em; white-space: nowrap; }
   .wc-empty { opacity: .7; padding: 24px 8px; text-align: center; font-size: .95em; }
   .wc-grid-tiles {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; margin-top: 14px;
@@ -863,6 +1076,18 @@ const MODAL_CSS = `
   .wc-detail-row { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; font-size: .88em; }
   .wc-detail-label { opacity: .7; }
   .wc-detail-value { text-align: right; }
+  .wc-stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 10px; margin: 14px 0; }
+  .wc-stat-tile {
+    border: 1px solid var(--divider-color, #ddd); border-radius: 10px; padding: 10px; text-align: center;
+    background: var(--secondary-background-color, #fafafa);
+  }
+  .wc-stat-num { font-size: 1.4em; font-weight: 700; color: var(--primary-color, #7B1D2E); }
+  .wc-stat-label { font-size: .78em; opacity: .75; margin-top: 2px; }
+  .wc-stat-bar-row { display: grid; grid-template-columns: 130px 1fr auto; align-items: center; gap: 8px; padding: 3px 0; font-size: .85em; }
+  .wc-stat-bar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wc-stat-bar-track { height: 8px; border-radius: 999px; background: var(--divider-color, #eee); overflow: hidden; }
+  .wc-stat-bar-fill { display: block; height: 100%; background: var(--primary-color, #7B1D2E); }
+  .wc-stat-bar-count { opacity: .75; min-width: 2ch; text-align: right; }
 `;
 
 if (typeof customElements !== "undefined") {
@@ -884,5 +1109,7 @@ if (typeof module !== "undefined" && module.exports) {
     applyRecognitionSelection, FORM_SECTIONS, CREATE_ONLY_SECTION,
     escapeHtml, STATUS_ORDER, STATUS_DOT, statusBreakdown, statusSummary,
     ratingStars, metaLine, tileHTML, detailRows,
+    matchesQuery, matchesStatusFilter, filterWhiskies, breakdownJS,
+    computeStats, topBreakdown,
   };
 }
