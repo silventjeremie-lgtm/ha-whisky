@@ -1,11 +1,11 @@
-"""Whisky v0.5.0 — Collection de whiskies pour Home Assistant.
+"""Whisky v0.6.0 — Collection de whiskies pour Home Assistant.
 
 Projet indépendant dérivé de Millésime (github.com/Redsklns/ha-millesime,
 MIT) : même style d'architecture (stockage JSON local, casiers/emplacements
 agnostiques, carte Lovelace auto-servie), vocabulaire et modèle de données
 entièrement propres au whisky.
 
-Commit 5/12 : + reconnaissance Gemini (texte + photo), prompt dédié whisky
+Commit 6/12 : + formulaire d'ajout/édition complet et reconnaissance photo
 distinct du prompt vin de Millésime. Aucune dépendance à Whiskybase ou toute
 autre base fermée (brief §2/§18) — sans clé Gemini, saisie manuelle
 uniquement, aucun repli automatique (documenté comme limitation).
@@ -33,7 +33,7 @@ _LOGGER = logging.getLogger(__name__)
 DOMAIN    = "whisky"
 PLATFORMS = ["sensor"]
 DATA_FILE = "whisky_data.json"
-VERSION   = "0.5.0"
+VERSION   = "0.6.0"
 
 # ── Classification whisky (brief §2) ──────────────────────────────────────────
 # Liste FERMÉE utilisée pour valider whisky_meta.whisky_type. "Other" couvre
@@ -158,7 +158,17 @@ def _rack_capacity(rk: dict) -> int:
 def _slot_taken(d: dict, rack_id: str, slot: int,
                 exclude_whisky_id: str | None = None,
                 exclude_slot_idx: int | None = None) -> bool:
-    """Retourne True si l'emplacement est déjà occupé dans ce casier."""
+    """Retourne True si l'emplacement est déjà occupé dans ce casier.
+
+    Un rack_id vide/falsy signifie "sans emplacement assigné" (bouteille
+    comptée dans la collection sans placement physique — le formulaire v1 de
+    la carte ne propose pas encore de sélecteur d'étagère, voir commit 6) :
+    ces exemplaires ne peuvent jamais entrer en collision entre eux, sinon
+    une seule bouteille "non placée" pourrait exister dans toute la
+    collection avant que le service ne refuse les suivantes.
+    """
+    if not rack_id:
+        return False
     for w in d.get("whiskies", []):
         for i, s in enumerate(w.get("slots", [])):
             if s["rack_id"] == rack_id and s["slot"] == slot:
@@ -999,18 +1009,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # ── Fiches whisky ─────────────────────────────────────────────────────────
 
     async def svc_add_whisky(call: ServiceCall) -> None:
-        """Crée une nouvelle fiche whisky, avec un premier emplacement optionnel."""
+        """Crée une nouvelle fiche whisky.
+
+        Deux modes de placement, non combinables dans un même appel :
+        - rack_id fourni : UN exemplaire précisément placé (slot).
+        - rack_id absent : `quantity` exemplaires SANS emplacement assigné
+          (rack_id=""), tous au statut `initial_status` — c'est le chemin
+          emprunté par le formulaire v1 de la carte (commit 6), qui ne
+          propose pas encore de sélecteur d'étagère.
+        """
         d = _get()
         name = str(call.data.get("name", "")).strip()
         if not name:
             raise HomeAssistantError("Le nom du whisky est requis.")
-        slots = []
+        initial_status = call.data.get("initial_status", "sealed")
+        if initial_status not in BOTTLE_STATUS_VALUES:
+            initial_status = "sealed"
         rack_id = call.data.get("rack_id")
         if rack_id:
             slot = int(call.data.get("slot", 0))
             if _slot_taken(d, rack_id, slot):
                 raise HomeAssistantError(f"L'emplacement n°{slot + 1} est déjà occupé dans cette étagère.")
-            slots = [_mk_slot(rack_id, slot, call.data.get("slot_comment"))]
+            slots = [_mk_slot(rack_id, slot, call.data.get("slot_comment"), bottle_status=initial_status)]
+        else:
+            qty = max(1, int(call.data.get("quantity", 1)))
+            slots = [_mk_slot("", 0, bottle_status=initial_status) for _ in range(qty)]
         meta = {k: call.data[k] for k in META_FIELDS if k in call.data}
         common = {k: call.data[k] for k in COMMON_FIELDS if k in call.data}
         record = _new_whisky_record(name, whisky_meta=meta, slots=slots, **common)

@@ -76,10 +76,16 @@ add_whisky:
       required: true
       example: "Lagavulin 16 Years Old"
     rack_id:
-      description: ID de l'étagère de destination (optionnel — fiche sans emplacement si omis)
+      description: ID de l'étagère de destination (optionnel — si omis, `quantity` exemplaires sans emplacement assigné sont créés)
     slot:
-      description: Numéro d'emplacement dans l'étagère
+      description: Numéro d'emplacement dans l'étagère (uniquement si rack_id est fourni)
       example: 0
+    quantity:
+      description: Nombre d'exemplaires à créer si rack_id est omis (défaut 1)
+      example: 1
+    initial_status:
+      description: "État initial des exemplaires créés : sealed, opened ou finished (défaut sealed)"
+      example: "sealed"
     distillery:
       description: Distillerie
       example: "Lagavulin"
