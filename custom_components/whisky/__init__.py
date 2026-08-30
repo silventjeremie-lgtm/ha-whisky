@@ -1,13 +1,12 @@
-"""Whisky v0.3.0 — Collection de whiskies pour Home Assistant.
+"""Whisky v0.4.0 — Collection de whiskies pour Home Assistant.
 
 Projet indépendant dérivé de Millésime (github.com/Redsklns/ha-millesime,
 MIT) : même style d'architecture (stockage JSON local, casiers/emplacements
 agnostiques, carte Lovelace auto-servie), vocabulaire et modèle de données
 entièrement propres au whisky.
 
-Commit 3/12 : services CRUD (fiches whisky, emplacements, étagères, caves,
-cycle de vie sealed→opened→finished). Pas encore de capteurs (commit 4) ni
-de reconnaissance photo (commit 5).
+Commit 4/12 : + capteurs Home Assistant (sensor.py). Pas encore de
+reconnaissance photo (commit 5).
 """
 from __future__ import annotations
 
@@ -26,7 +25,7 @@ _LOGGER = logging.getLogger(__name__)
 DOMAIN    = "whisky"
 PLATFORMS = ["sensor"]
 DATA_FILE = "whisky_data.json"
-VERSION   = "0.3.0"
+VERSION   = "0.4.0"
 
 # ── Classification whisky (brief §2) ──────────────────────────────────────────
 # Liste FERMÉE utilisée pour valider whisky_meta.whisky_type. "Other" couvre
