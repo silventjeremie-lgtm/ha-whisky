@@ -336,3 +336,25 @@ finish_bottle:
       description: Note personnelle /5 pour ce whisky
     comment:
       description: Commentaire de dégustation pour cet exemplaire
+
+update_remaining:
+  name: Mettre à jour le niveau restant
+  description: >-
+    Met à jour le niveau restant (%) d'un exemplaire OUVERT (suivi manuel,
+    ex. pesée ou estimation visuelle). Déclenche l'événement whisky_bottle_low
+    UNIQUEMENT au franchissement du seuil bas (pas à chaque appel), utilisable
+    directement comme déclencheur d'automatisation.
+  fields:
+    whisky_id:
+      description: ID du whisky
+      required: true
+    slot_idx:
+      description: Index de l'exemplaire (défaut 0)
+      example: 0
+    remaining_percent:
+      description: Niveau restant, de 0 à 100
+      required: true
+      example: 35
+    low_threshold:
+      description: Seuil bas déclenchant whisky_bottle_low au franchissement (défaut 20)
+      example: 20

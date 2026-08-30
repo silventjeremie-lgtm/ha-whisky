@@ -3,18 +3,19 @@
 // licence MIT) : même style d'architecture (Web Component vanilla, Shadow
 // DOM, rendu par template strings), vocabulaire entièrement whisky.
 //
-// Commit 8/12 : panneau de statistiques (totaux, statuts, valeur du stock,
-// âge moyen, répartitions pays/région/distillerie/type/tourbe — miroir des
-// capteurs sensor.py, recalculé côté carte) + barre de recherche/filtres
-// (texte libre, type, statut, coups de cœur) au-dessus de la grille de
-// tuiles. Le commit 7 avait posé la liste (tuiles) et la fiche détail ; le
-// commit 6, le formulaire d'ajout/édition et la reconnaissance photo Gemini.
+// Commit 9/12 : suivi du niveau restant d'une bouteille ouverte depuis la
+// fiche détail (input % + bouton "Mettre à jour", appelle le service
+// update_remaining ajouté côté backend — déclenche whisky_bottle_low au
+// franchissement du seuil bas). Le commit 8 avait posé le panneau de
+// statistiques et la barre de recherche/filtres ; le commit 7, la liste
+// (tuiles) et la fiche détail ; le commit 6, le formulaire d'ajout/édition
+// et la reconnaissance photo Gemini.
 //
 // Les fonctions PURES (sans DOM) sont exportées en fin de fichier pour être
 // testées avec Node (voir tests/), sans dépendre d'un navigateur ou de HA.
 
 const DOMAIN = "whisky";
-const VERSION = "0.8.0";
+const VERSION = "0.9.0";
 
 // Doit rester synchronisé avec WHISKY_TYPE_VALUES dans __init__.py.
 const WHISKY_TYPE_VALUES = [
@@ -659,20 +660,35 @@ class WhiskyCard extends HTMLElement {
       const status = s.bottle_status || "sealed";
       const extra = [];
       if (status === "opened" && s.opened_date) extra.push(`ouverte le ${escapeHtml(s.opened_date)}`);
+      if (status === "opened") extra.push(`${s.remaining_percent != null ? s.remaining_percent : 100}% restant`);
       if (status === "finished" && s.finished_date) extra.push(`terminée le ${escapeHtml(s.finished_date)}`);
       if (s.comment) extra.push(escapeHtml(s.comment));
       const actions = [];
       if (status === "sealed") actions.push(`<button type="button" class="wc-btn wc-slot-open" data-idx="${idx}">Ouvrir</button>`);
       if (status === "opened") actions.push(`<button type="button" class="wc-btn wc-slot-finish" data-idx="${idx}">Terminer</button>`);
       actions.push(`<button type="button" class="wc-btn wc-slot-remove" data-idx="${idx}">Retirer</button>`);
+      // Suivi manuel du niveau restant (commit 9 : svc_update_remaining) —
+      // uniquement pour un exemplaire ouvert, déclenche whisky_bottle_low
+      // côté backend au franchissement du seuil bas.
+      const remainingRow = status === "opened" ? `
+        <div class="wc-slot-remaining-row">
+          <label class="wc-slot-remaining-label">Niveau restant
+            <input type="number" min="0" max="100" step="5" class="wc-slot-remaining-input"
+              data-idx="${idx}" value="${s.remaining_percent != null ? s.remaining_percent : 100}" />%
+          </label>
+          <button type="button" class="wc-btn wc-slot-remaining-save" data-idx="${idx}">Mettre à jour</button>
+        </div>` : "";
       return `
-        <div class="wc-slot-row">
-          <span class="wc-slot-dot">${STATUS_DOT[status] || "●"}</span>
-          <span class="wc-slot-place">${place}</span>
-          <span class="wc-slot-status">${escapeHtml(BOTTLE_STATUS_LABELS[status] || status)}${extra.length ? " · " + extra.join(" · ") : ""}</span>
-          <span class="wc-slot-actions">${actions.join("")}</span>
+        <div class="wc-slot">
+          <div class="wc-slot-row">
+            <span class="wc-slot-dot">${STATUS_DOT[status] || "●"}</span>
+            <span class="wc-slot-place">${place}</span>
+            <span class="wc-slot-status">${escapeHtml(BOTTLE_STATUS_LABELS[status] || status)}${extra.length ? " · " + extra.join(" · ") : ""}</span>
+            <span class="wc-slot-actions">${actions.join("")}</span>
+          </div>
+          ${remainingRow}
         </div>`;
-    }).join("") || `<div class="wc-slot-row wc-slot-empty">Aucun exemplaire.</div>`;
+    }).join("") || `<div class="wc-slot wc-slot-empty">Aucun exemplaire.</div>`;
 
     const tastingFields = [
       ["Notes générales", meta.tasting_notes], ["Nez", meta.nose_notes],
@@ -751,6 +767,20 @@ class WhiskyCard extends HTMLElement {
       btn.addEventListener("click", async () => {
         try {
           await this._hass.callService(DOMAIN, "finish_bottle", { whisky_id: w.id, slot_idx: Number(btn.dataset.idx) });
+          await refresh();
+        } catch (err) {
+          this._toast(box, `Erreur : ${(err && err.message) || err}`);
+        }
+      });
+    });
+    box.querySelectorAll(".wc-slot-remaining-save").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const idx = Number(btn.dataset.idx);
+        const input = box.querySelector(`.wc-slot-remaining-input[data-idx="${idx}"]`);
+        const pct = input ? Number(input.value) : NaN;
+        if (!Number.isFinite(pct)) { this._toast(box, "Niveau restant invalide (0 à 100)."); return; }
+        try {
+          await this._hass.callService(DOMAIN, "update_remaining", { whisky_id: w.id, slot_idx: idx, remaining_percent: pct });
           await refresh();
         } catch (err) {
           this._toast(box, `Erreur : ${(err && err.message) || err}`);
@@ -1063,16 +1093,23 @@ const MODAL_CSS = `
   .wc-detail-actions { display: flex; gap: 8px; flex-wrap: wrap; }
   .wc-detail-img { width: 100%; max-height: 220px; object-fit: cover; border-radius: 10px; margin: 10px 0; display: block; }
   .wc-slot-summary { opacity: .8; font-size: .9em; margin: 6px 0; }
-  .wc-slots { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
-  .wc-slot-row {
-    display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px;
+  .wc-slots { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+  .wc-slot {
     border: 1px solid var(--divider-color, #ddd); border-radius: 8px; padding: 6px 10px; font-size: .85em;
   }
-  .wc-slot-row.wc-slot-empty { grid-template-columns: 1fr; opacity: .7; }
+  .wc-slot.wc-slot-empty { opacity: .7; border-style: dashed; }
+  .wc-slot-row { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; }
   .wc-slot-place { grid-column: 2; }
   .wc-slot-status { grid-column: 1 / -1; opacity: .75; font-size: .92em; }
   .wc-slot-actions { grid-column: 3; display: flex; gap: 6px; flex-wrap: wrap; justify-self: end; }
   .wc-slot-actions .wc-btn { padding: 4px 10px; font-size: .85em; }
+  .wc-slot-remaining-row {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 6px; padding-top: 6px;
+    border-top: 1px dashed var(--divider-color, #ddd); font-size: .88em;
+  }
+  .wc-slot-remaining-label { display: flex; align-items: center; gap: 6px; opacity: .85; }
+  .wc-slot-remaining-input { width: 4.5em; padding: 3px 6px; }
+  .wc-slot-remaining-save { padding: 3px 10px; font-size: .85em; }
   .wc-detail-row { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; font-size: .88em; }
   .wc-detail-label { opacity: .7; }
   .wc-detail-value { text-align: right; }

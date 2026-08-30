@@ -1,8 +1,10 @@
-"""Capteurs Whisky — v0.4.0.
+"""Capteurs Whisky — v0.9.0.
 
 Sept capteurs globaux, conformes au brief §9 :
   sensor.whisky_total              nombre total de bouteilles (exemplaires physiques)
-  sensor.whisky_opened             bouteilles ouvertes
+  sensor.whisky_opened             bouteilles ouvertes (+ attribut "bottles" :
+                                    détail par exemplaire ouvert avec ancienneté
+                                    d'ouverture, pour les automatisations — commit 9)
   sensor.whisky_sealed             bouteilles scellées
   sensor.whisky_finished           bouteilles terminées
   sensor.whisky_distilleries       nombre de distilleries distinctes représentées
@@ -18,6 +20,8 @@ plupart des installations) — pourra être ajouté plus tard sur le modèle
 multi-caves de Millésime si le besoin se présente.
 """
 from __future__ import annotations
+
+from datetime import date
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
@@ -57,6 +61,43 @@ def _breakdown(data: dict, key_fn) -> dict[str, int]:
         counts[key] = counts.get(key, 0) + n
     top = dict(sorted(counts.items(), key=lambda kv: -kv[1])[:_MAX_BREAKDOWN_KEYS])
     return top
+
+
+def _opened_bottles(data: dict) -> list[dict]:
+    """Détail des exemplaires actuellement OUVERTS, avec ancienneté d'ouverture.
+
+    Exposé en attribut de sensor.whisky_opened (pas en entité par bouteille,
+    pour ne pas faire exploser le nombre d'entités sur une grosse collection)
+    afin de permettre des automatisations basées sur la durée d'ouverture —
+    ex. brief §11 : "notifie-moi si une bouteille ouverte depuis plus de 6
+    mois n'est toujours pas terminée" via un template Jinja lisant
+    state_attr('sensor.whisky_ouvertes', 'bottles') | selectattr('days_open', 'gt', 180).
+    Triée par ancienneté décroissante (les plus vieilles bouteilles ouvertes
+    en premier, cas d'usage le plus courant).
+    """
+    today = date.today()
+    out: list[dict] = []
+    for w in _whiskies(data):
+        for idx, s in enumerate(w.get("slots", [])):
+            if s.get("bottle_status") != "opened":
+                continue
+            opened_date = s.get("opened_date")
+            days_open = None
+            if opened_date:
+                try:
+                    days_open = (today - date.fromisoformat(str(opened_date)[:10])).days
+                except ValueError:
+                    days_open = None
+            out.append({
+                "whisky_id": w.get("id"),
+                "name": w.get("name", ""),
+                "slot_idx": idx,
+                "opened_date": opened_date,
+                "days_open": days_open,
+                "remaining_percent": s.get("remaining_percent"),
+            })
+    out.sort(key=lambda b: (b["days_open"] is None, -(b["days_open"] or 0)))
+    return out
 
 
 def _collection_value(data: dict) -> float:
@@ -172,6 +213,10 @@ class WhiskyOpenedSensor(WhiskyBaseSensor):
     @property
     def native_value(self) -> int:
         return _count_by_status(self._data, "opened")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return {"bottles": _opened_bottles(self._data)}
 
 
 class WhiskySealedSensor(WhiskyBaseSensor):

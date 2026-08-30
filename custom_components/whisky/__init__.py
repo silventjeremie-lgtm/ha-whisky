@@ -1,16 +1,18 @@
-"""Whisky v0.8.0 — Collection de whiskies pour Home Assistant.
+"""Whisky v0.9.0 — Collection de whiskies pour Home Assistant.
 
 Projet indépendant dérivé de Millésime (github.com/Redsklns/ha-millesime,
 MIT) : même style d'architecture (stockage JSON local, casiers/emplacements
 agnostiques, carte Lovelace auto-servie), vocabulaire et modèle de données
 entièrement propres au whisky.
 
-Commit 8/12 : + panneau de statistiques et barre de recherche/filtres côté
-carte (aucun changement backend — les agrégats sont recalculés côté client à
-partir de whisky/get_data, sur le même modèle que les capteurs sensor.py).
-Aucune dépendance à Whiskybase ou toute autre base fermée (brief §2/§18) —
-sans clé Gemini, saisie manuelle uniquement, aucun repli automatique
-(documenté comme limitation).
+Commit 9/12 : + service update_remaining (suivi manuel du niveau restant
+d'une bouteille ouverte) et événement whisky_bottle_low, déclenché
+uniquement au franchissement du seuil bas — prêt pour l'automatisation
+(brief §11). Voir aussi sensor.py : attribut "bottles" de
+sensor.whisky_opened, pour les automatisations basées sur la durée
+d'ouverture. Aucune dépendance à Whiskybase ou toute autre base fermée
+(brief §2/§18) — sans clé Gemini, saisie manuelle uniquement, aucun repli
+automatique (documenté comme limitation).
 """
 from __future__ import annotations
 
@@ -35,7 +37,7 @@ _LOGGER = logging.getLogger(__name__)
 DOMAIN    = "whisky"
 PLATFORMS = ["sensor"]
 DATA_FILE = "whisky_data.json"
-VERSION   = "0.8.0"
+VERSION   = "0.9.0"
 
 # ── Classification whisky (brief §2) ──────────────────────────────────────────
 # Liste FERMÉE utilisée pour valider whisky_meta.whisky_type. "Other" couvre
@@ -1188,6 +1190,44 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "whisky_id": w["id"], "slot_idx": slot_idx, "name": w.get("name", ""),
         })
 
+    async def svc_update_remaining(call: ServiceCall) -> None:
+        """Met à jour le niveau restant (%) d'un exemplaire OUVERT.
+
+        Permet un suivi manuel (pesée, estimation visuelle) entre l'ouverture
+        (100%, fixé par open_bottle) et la fin (0%, fixé par finish_bottle).
+        Déclenche whisky_bottle_low UNIQUEMENT au franchissement du seuil bas
+        (front descendant : la valeur PRÉCÉDENTE était au-dessus du seuil, la
+        NOUVELLE est à ou en dessous) — pas à chaque appel, pour rester
+        directement utilisable dans une automatisation sans déclenchement
+        répété à chaque mise à jour (brief §11 : services prêts pour
+        l'automatisation).
+        """
+        d = _get()
+        w = _find_whisky(d, call.data["whisky_id"])
+        if not w:
+            raise HomeAssistantError(f"Whisky introuvable : {call.data['whisky_id']}")
+        slot_idx = int(call.data.get("slot_idx", 0))
+        if slot_idx >= len(w["slots"]):
+            raise HomeAssistantError(f"Index d'emplacement {slot_idx} invalide pour ce whisky.")
+        s = w["slots"][slot_idx]
+        if s.get("bottle_status", "sealed") != "opened":
+            raise HomeAssistantError("Seul un exemplaire ouvert a un niveau restant à suivre.")
+        try:
+            raw_pct = float(str(call.data["remaining_percent"]).replace(",", "."))
+        except (KeyError, TypeError, ValueError):
+            raise HomeAssistantError("remaining_percent doit être un nombre entre 0 et 100.")
+        pct = max(0, min(100, round(raw_pct)))
+        threshold = max(0, min(100, int(call.data.get("low_threshold", 20))))
+        previous = s.get("remaining_percent")
+        s["remaining_percent"] = pct
+        await _persist(d)
+        crossed_down = (previous is None or previous > threshold) and pct <= threshold
+        if crossed_down:
+            hass.bus.async_fire(f"{DOMAIN}_bottle_low", {
+                "whisky_id": w["id"], "slot_idx": slot_idx, "name": w.get("name", ""),
+                "remaining_percent": pct, "threshold": threshold,
+            })
+
     hass.services.async_register(DOMAIN, "add_rack",       svc_add_rack)
     hass.services.async_register(DOMAIN, "update_rack",    svc_update_rack)
     hass.services.async_register(DOMAIN, "remove_rack",    svc_remove_rack)
@@ -1203,6 +1243,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_register(DOMAIN, "remove_slot",    svc_remove_slot)
     hass.services.async_register(DOMAIN, "open_bottle",    svc_open_bottle)
     hass.services.async_register(DOMAIN, "finish_bottle",  svc_finish_bottle)
+    hass.services.async_register(DOMAIN, "update_remaining", svc_update_remaining)
 
     _LOGGER.info("Whisky v%s démarré (%d fiche(s))", VERSION, len(data.get("whiskies", [])))
     return True
