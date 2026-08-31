@@ -14,7 +14,7 @@
 // testées avec Node (voir tests/), sans dépendre d'un navigateur ou de HA.
 
 const DOMAIN = "whisky";
-const VERSION = "1.0.1";
+const VERSION = "1.0.2";
 
 // Doit rester synchronisé avec WHISKY_TYPE_VALUES dans __init__.py.
 const WHISKY_TYPE_VALUES = [
@@ -862,9 +862,15 @@ class WhiskyCard extends HTMLElement {
     return `
       <h2 class="wc-modal-title">${existing ? "Modifier le whisky" : "Ajouter un whisky"}</h2>
       <div class="wc-photo-row">
-        <button type="button" class="wc-btn" id="wc-photo-btn">📷 Identifier par photo</button>
+        <button type="button" class="wc-btn" id="wc-photo-cam">📷 Prendre une photo</button>
+        <button type="button" class="wc-btn" id="wc-photo-lib">🖼️ Galerie</button>
         <span class="wc-photo-hint">Analyse l'étiquette (Gemini) — les résultats restent à valider avant tout enregistrement.</span>
-        <input type="file" id="wc-photo-input" accept="image/*" capture="environment" hidden />
+        <!-- Deux inputs statiques distincts : l'attribut capture doit être présent dès la
+             création (comme dans millesime-card.js) pour que l'appareil photo direct
+             fonctionne de façon fiable sur Android — un seul input avec capture="environment"
+             se rabat silencieusement sur la galerie sur certaines WebView. -->
+        <input type="file" id="wc-photo-input" accept="image/*" hidden />
+        <input type="file" id="wc-photo-input-cam" accept="image/*" capture="environment" hidden />
       </div>
       <div id="wc-recognition-panel"></div>
       <datalist id="whisky-cask-types">${CASK_TYPE_SUGGESTIONS.map((c) => `<option value="${c}">`).join("")}</datalist>
@@ -880,8 +886,21 @@ class WhiskyCard extends HTMLElement {
 
   _bindForm(box, existing) {
     box.querySelector("#wc-cancel").addEventListener("click", () => this._closeModal());
-    box.querySelector("#wc-photo-btn").addEventListener("click", () => box.querySelector("#wc-photo-input").click());
-    box.querySelector("#wc-photo-input").addEventListener("change", (e) => this._onScanFile(box, e.target));
+
+    const fileInput = box.querySelector("#wc-photo-input");
+    const fileInputCam = box.querySelector("#wc-photo-input-cam");
+    box.querySelector("#wc-photo-cam").addEventListener("click", async () => {
+      // Appareil photo direct tenté en premier via getUserMedia (fiable sur
+      // Android, contrairement au seul attribut capture) ; repli sur l'input
+      // statique avec capture si getUserMedia est indisponible/refusé.
+      const shot = await this._captureViaCamera(box);
+      if (shot instanceof File) { this._onScanFile(box, shot); return; }
+      if (shot === "cancel") return;
+      fileInputCam.click();
+    });
+    box.querySelector("#wc-photo-lib").addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", (e) => this._onScanFile(box, e.target));
+    fileInputCam.addEventListener("change", (e) => this._onScanFile(box, e.target));
 
     box.querySelector("#wc-form").addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -919,8 +938,11 @@ class WhiskyCard extends HTMLElement {
 
   // ── Reconnaissance photo ──────────────────────────────────────────────────
 
-  _onScanFile(box, input) {
-    const file = input.files && input.files[0];
+  // Accepte soit un <input type=file> (parcours galerie / input statique
+  // avec capture), soit directement un File (photo issue du modal caméra
+  // getUserMedia — voir _captureViaCamera).
+  _onScanFile(box, inputOrFile) {
+    const file = inputOrFile instanceof File ? inputOrFile : (inputOrFile.files && inputOrFile.files[0]);
     if (!file) return;
     const reader = new FileReader();
     reader.onerror = () => this._toast(box, "Impossible de lire la photo.");
@@ -940,7 +962,95 @@ class WhiskyCard extends HTMLElement {
       }
     };
     reader.readAsDataURL(file);
-    input.value = "";
+    if (!(inputOrFile instanceof File)) inputOrFile.value = "";
+  }
+
+  // ── Repli caméra via getUserMedia (Android) ─────────────────────────────
+  // Sur certains appareils Android, la WebView ouvre la galerie même avec un
+  // input statique portant l'attribut capture. getUserMedia est donc tenté
+  // en premier — c'est le seul chemin qui garantit l'ouverture de l'appareil
+  // photo. L'API n'existe qu'en contexte sécurisé (HTTPS / app compagnon en
+  // URL externe / localhost) : en HTTP local, on prévient explicitement
+  // l'utilisateur avant le repli galerie. (Porté de millesime-card.js,
+  // même correctif que l'issue #7 de Millésime.)
+  _cameraSupported() {
+    return !!navigator.mediaDevices?.getUserMedia;
+  }
+
+  _cameraFallbackNotice(box, reason) {
+    if (reason === "insecure") {
+      this._toast(box,
+        "Photo depuis la galerie : l'accès direct à l'appareil photo est réservé " +
+        "aux connexions sécurisées (https). Ce n'est pas un défaut de Whisky — " +
+        "prenez la photo avec votre appareil photo puis choisissez-la dans la galerie, " +
+        "ou accédez à Home Assistant en https (URL externe / Nabu Casa) pour la prise directe.");
+    } else if (reason === "denied") {
+      this._toast(box,
+        "Accès caméra refusé — vérifiez les permissions de l'app Home Assistant " +
+        "(Réglages → Applications → Home Assistant → Autorisations → Appareil photo). " +
+        "En attendant, la photo depuis la galerie fonctionne.");
+    }
+  }
+
+  // Résout avec : File (photo capturée) | "cancel" (fermé par l'utilisateur)
+  // | null (échec technique → l'appelant retombe sur l'input statique).
+  async _captureViaCamera(box) {
+    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+      this._cameraFallbackNotice(box, "insecure");
+      return null;
+    }
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+        audio: false,
+      });
+    } catch (err) {
+      console.warn("[Whisky] getUserMedia indisponible :", err);
+      this._cameraFallbackNotice(box,
+        (err && (err.name === "NotAllowedError" || err.name === "SecurityError")) ? "denied" : "insecure");
+      return null;
+    }
+    return new Promise((resolve) => {
+      const overlay = document.createElement("div");
+      overlay.style.cssText = "position:fixed;inset:0;z-index:100000;background:#000;display:flex;flex-direction:column;";
+      const video = document.createElement("video");
+      video.autoplay = true; video.playsInline = true; video.muted = true;
+      video.style.cssText = "flex:1;min-height:0;width:100%;object-fit:contain;background:#000;";
+      video.srcObject = stream;
+      const bar = document.createElement("div");
+      bar.style.cssText = "display:flex;gap:14px;justify-content:center;align-items:center;background:#111;" +
+        "padding:16px 16px calc(env(safe-area-inset-bottom, 0px) + 16px);";
+      const mkBtn = (txt, primary) => {
+        const b = document.createElement("button");
+        b.type = "button"; b.textContent = txt;
+        b.style.cssText = "border:none;border-radius:999px;padding:14px 26px;font-size:1em;cursor:pointer;" +
+          (primary ? "background:linear-gradient(135deg,#d97706,#92400e);color:#fff;font-weight:600;" : "background:#333;color:#ddd;");
+        return b;
+      };
+      const btnShot = mkBtn("📷 Capturer", true);
+      const btnCancel = mkBtn("Annuler", false);
+      const done = (result) => {
+        try { stream.getTracks().forEach((t) => t.stop()); } catch (err) { /* déjà arrêté */ }
+        overlay.remove();
+        resolve(result);
+      };
+      btnShot.addEventListener("click", () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = video.videoWidth || 1280;
+        canvas.height = video.videoHeight || 720;
+        canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob((blob) => {
+          done(blob ? new File([blob], "capture.jpg", { type: "image/jpeg" }) : null);
+        }, "image/jpeg", 0.92);
+      });
+      btnCancel.addEventListener("click", () => done("cancel"));
+      bar.appendChild(btnCancel);
+      bar.appendChild(btnShot);
+      overlay.appendChild(video);
+      overlay.appendChild(bar);
+      document.body.appendChild(overlay);
+    });
   }
 
   _showRecognitionLoading(box) {
