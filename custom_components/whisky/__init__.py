@@ -1,4 +1,4 @@
-"""Whisky v1.0.0 — Collection de whiskies pour Home Assistant.
+"""Whisky — Collection de whiskies pour Home Assistant.
 
 Projet indépendant dérivé de Millésime (github.com/Redsklns/ha-millesime,
 MIT) : même style d'architecture (stockage JSON local, casiers/emplacements
@@ -36,7 +36,28 @@ _LOGGER = logging.getLogger(__name__)
 DOMAIN    = "whisky"
 PLATFORMS = ["sensor"]
 DATA_FILE = "whisky_data.json"
-VERSION   = "1.0.0"
+
+
+def _read_manifest_version() -> str:
+    """Lit la version depuis manifest.json — source UNIQUE de vérité pour le
+    cache-busting de la carte (voir _async_register_card, url = .../whisky-
+    card.js?v=VERSION). RÉGRESSION CORRIGÉE ICI : une constante VERSION
+    dupliquée à la main restait figée à "1.0.0" alors que manifest.json et
+    whisky-card.js avançaient normalement à chaque version (1.0.1, 1.0.2,
+    1.1.0, 1.2.0) — l'URL de la ressource Lovelace ne changeait donc JAMAIS,
+    et le navigateur continuait de servir indéfiniment le tout premier
+    whisky-card.js mis en cache, quelle que soit la mise à jour réellement
+    installée. En dérivant VERSION de manifest.json, une seule valeur à
+    bumper par version (déjà fait à chaque release) suffit désormais."""
+    try:
+        manifest_path = os.path.join(os.path.dirname(__file__), "manifest.json")
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            return json.load(f).get("version") or "0.0.0"
+    except Exception:
+        return "0.0.0"
+
+
+VERSION = _read_manifest_version()
 
 # ── Classification whisky (brief §2) ──────────────────────────────────────────
 # Liste FERMÉE utilisée pour valider whisky_meta.whisky_type. "Other" couvre

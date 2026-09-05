@@ -14,7 +14,7 @@
 // testées avec Node (voir tests/), sans dépendre d'un navigateur ou de HA.
 
 const DOMAIN = "whisky";
-const VERSION = "1.2.0";
+const VERSION = "1.2.1";
 
 // Doit rester synchronisé avec WHISKY_TYPE_VALUES dans __init__.py.
 const WHISKY_TYPE_VALUES = [
