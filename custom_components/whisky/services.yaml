@@ -358,3 +358,43 @@ update_remaining:
     low_threshold:
       description: Seuil bas déclenchant whisky_bottle_low au franchissement (défaut 20)
       example: 20
+
+add_tasting:
+  name: Ajouter une dégustation (hors collection)
+  description: >-
+    Ajoute une entrée dans le journal de dégustation pour un whisky simplement
+    GOÛTÉ (chez un ami, en bar, lors d'une dégustation) sans jamais avoir
+    possédé de bouteille. N'a AUCUN impact sur la collection (whiskies,
+    étagères, capteurs) : ces entrées vivent dans une liste séparée et
+    apparaissent avec les bouteilles terminées dans l'onglet "Whisky bu" de
+    la carte. Déclenche l'événement whisky_tasting_added.
+  fields:
+    name:
+      description: Nom du whisky goûté
+      required: true
+      example: "Talisker 18 Years Old"
+    distillery:
+      description: Distillerie
+    whisky_type:
+      description: "Type : Single Malt, Blended Malt, Blended Whisky, Single Grain, Bourbon, Rye, Tennessee Whiskey, Corn Whiskey, Irish Single Malt, Irish Pot Still, Japanese Whisky, World Whisky, Other"
+    region:
+      description: Région
+    country:
+      description: Pays
+    place:
+      description: "Lieu de la dégustation (ex. \"Chez Marc\", \"Bar Le Malt\")"
+      example: "Chez Marc"
+    tasted_date:
+      description: Date de la dégustation (YYYY-MM-DD, défaut aujourd'hui)
+    rating:
+      description: Note personnelle /5
+    comment:
+      description: Commentaire de dégustation
+
+remove_tasting:
+  name: Supprimer une dégustation (hors collection)
+  description: Supprime une entrée du journal de dégustation.
+  fields:
+    tasting_id:
+      description: ID de l'entrée de dégustation
+      required: true

@@ -1227,6 +1227,52 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "remaining_percent": pct, "threshold": threshold,
             })
 
+    async def svc_add_tasting(call: ServiceCall) -> None:
+        """Ajoute une dégustation SANS lien avec la collection.
+
+        Contrairement à finish_bottle (qui clôt un exemplaire réellement
+        possédé), cette entrée sert à noter un whisky simplement GOÛTÉ —
+        chez un ami, en bar, lors d'une dégustation — sans jamais avoir
+        possédé de bouteille. Alimente le même onglet "Whisky bu" côté
+        carte, mais dans une liste séparée (tasting_log), jamais dans
+        whiskies[] : aucun impact sur les capteurs de collection
+        (sensor.whisky_total, whisky_collection_value, etc.).
+        """
+        d = _get()
+        name = str(call.data.get("name", "")).strip()
+        if not name:
+            raise HomeAssistantError("Le nom du whisky est requis.")
+        rating = call.data.get("rating", 0)
+        try:
+            rating = round(float(str(rating).replace(",", ".")), 1)
+        except (TypeError, ValueError):
+            rating = 0
+        entry = {
+            "id":           _uid(),
+            "name":         name,
+            "distillery":   str(call.data.get("distillery", "") or "").strip(),
+            "whisky_type":  call.data.get("whisky_type", ""),
+            "region":       str(call.data.get("region", "") or "").strip(),
+            "country":      str(call.data.get("country", "") or "").strip(),
+            "place":        str(call.data.get("place", "") or "").strip(),
+            "tasted_date":  call.data.get("tasted_date") or datetime.now().strftime("%Y-%m-%d"),
+            "rating":       rating,
+            "comment":      str(call.data.get("comment", "") or "").strip(),
+        }
+        log = d.setdefault("tasting_log", [])
+        log.append(entry)
+        # Garder les 1000 dernières dégustations (même limite que Millésime).
+        d["tasting_log"] = log[-1000:]
+        await _persist(d)
+        hass.bus.async_fire(f"{DOMAIN}_tasting_added", {"tasting_id": entry["id"], "name": name})
+
+    async def svc_remove_tasting(call: ServiceCall) -> None:
+        """Supprime une entrée du journal de dégustation (whisky goûté hors collection)."""
+        d = _get()
+        tid = call.data["tasting_id"]
+        d["tasting_log"] = [t for t in d.get("tasting_log", []) if t.get("id") != tid]
+        await _persist(d)
+
     hass.services.async_register(DOMAIN, "add_rack",       svc_add_rack)
     hass.services.async_register(DOMAIN, "update_rack",    svc_update_rack)
     hass.services.async_register(DOMAIN, "remove_rack",    svc_remove_rack)
@@ -1243,6 +1289,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_register(DOMAIN, "open_bottle",    svc_open_bottle)
     hass.services.async_register(DOMAIN, "finish_bottle",  svc_finish_bottle)
     hass.services.async_register(DOMAIN, "update_remaining", svc_update_remaining)
+    hass.services.async_register(DOMAIN, "add_tasting",    svc_add_tasting)
+    hass.services.async_register(DOMAIN, "remove_tasting", svc_remove_tasting)
 
     _LOGGER.info("Whisky v%s démarré (%d fiche(s))", VERSION, len(data.get("whiskies", [])))
     return True

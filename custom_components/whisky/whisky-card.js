@@ -14,7 +14,7 @@
 // testées avec Node (voir tests/), sans dépendre d'un navigateur ou de HA.
 
 const DOMAIN = "whisky";
-const VERSION = "1.0.2";
+const VERSION = "1.2.0";
 
 // Doit rester synchronisé avec WHISKY_TYPE_VALUES dans __init__.py.
 const WHISKY_TYPE_VALUES = [
@@ -314,6 +314,77 @@ function tileHTML(w) {
     </div>`;
 }
 
+/**
+ * Aplatit tous les exemplaires TERMINÉS de la collection en une liste plate
+ * {whisky, slot, slotIdx}, triée par date de fin décroissante (les exemplaires
+ * sans date connue sont relégués en fin de liste). Alimente l'onglet
+ * "🥂 Whisky bu" — un journal des bouteilles terminées, distinct de la vue
+ * "Collection" qui mélange tous les statuts.
+ */
+function finishedEntries(whiskies) {
+  const out = [];
+  for (const w of whiskies || []) {
+    (w.slots || []).forEach((slot, slotIdx) => {
+      if ((slot.bottle_status || "sealed") === "finished") out.push({ w, slot, slotIdx });
+    });
+  }
+  out.sort((a, b) => String(b.slot.finished_date || "").localeCompare(String(a.slot.finished_date || "")));
+  return out;
+}
+
+function finishedRowHTML(entry) {
+  const { w, slot, slotIdx } = entry;
+  const meta = w.whisky_meta || {};
+  const line = metaLine([meta.region || meta.country, meta.whisky_type, meta.age ? `${meta.age} ans` : null]);
+  const date = slot.finished_date ? `Terminée le ${escapeHtml(slot.finished_date)}` : "Date de fin inconnue";
+  const img = w.image_url
+    ? `<img class="wc-fin-img" src="${escapeHtml(w.image_url)}" alt="" />`
+    : `<div class="wc-fin-img wc-fin-img-placeholder">🥃</div>`;
+  return `
+    <div class="wc-fin-row" data-whisky-id="${escapeHtml(w.id)}" data-slot-idx="${slotIdx}">
+      ${img}
+      <div class="wc-fin-body">
+        <div class="wc-fin-name">${w.favorite ? "★ " : ""}${escapeHtml(w.name)}</div>
+        ${line ? `<div class="wc-fin-sub">${escapeHtml(line)}</div>` : ""}
+        <div class="wc-fin-date">${date}</div>
+        ${slot.comment ? `<div class="wc-fin-comment">${escapeHtml(slot.comment)}</div>` : ""}
+      </div>
+      ${w.rating ? `<div class="wc-fin-rating">${ratingStars(w.rating)}</div>` : ""}
+    </div>`;
+}
+
+function tastingRowHTML(t) {
+  const line = metaLine([t.region || t.country, t.whisky_type]);
+  const date = t.tasted_date ? `Dégusté le ${escapeHtml(t.tasted_date)}` : "Date inconnue";
+  const badge = `🥂 Hors collection${t.place ? ` · ${escapeHtml(t.place)}` : ""}`;
+  return `
+    <div class="wc-fin-row wc-tasting-row" data-tasting-id="${escapeHtml(t.id)}">
+      <div class="wc-fin-img wc-fin-img-placeholder">🥂</div>
+      <div class="wc-fin-body">
+        <div class="wc-fin-name">${escapeHtml(t.name)}</div>
+        ${line ? `<div class="wc-fin-sub">${escapeHtml(line)}</div>` : ""}
+        <div class="wc-fin-sub wc-tasting-badge">${badge}</div>
+        <div class="wc-fin-date">${date}</div>
+        ${t.comment ? `<div class="wc-fin-comment">${escapeHtml(t.comment)}</div>` : ""}
+      </div>
+      ${t.rating ? `<div class="wc-fin-rating">${ratingStars(t.rating)}</div>` : ""}
+      <button type="button" class="wc-btn wc-tasting-remove" data-tasting-id="${escapeHtml(t.id)}" title="Supprimer cette dégustation">🗑️</button>
+    </div>`;
+}
+
+/**
+ * Fusionne, pour l'onglet "🥂 Whisky bu", les bouteilles TERMINÉES de la
+ * collection (`finishedEntries`) et les dégustations hors collection
+ * (`tasting_log` — whiskies simplement goûtés, jamais possédés), triées
+ * ensemble du plus récent au plus ancien. Chaque entrée porte un
+ * discriminant `kind` ("finished" | "tasting") pour choisir le bon rendu.
+ */
+function mergedTastingEntries(whiskies, tastingLog) {
+  const finished = finishedEntries(whiskies).map((e) => ({ kind: "finished", date: e.slot.finished_date || "", entry: e }));
+  const tastings = (tastingLog || []).map((t) => ({ kind: "tasting", date: t.tasted_date || "", entry: t }));
+  return [...finished, ...tastings].sort((a, b) => String(b.date).localeCompare(String(a.date)));
+}
+
 /** Regroupe les champs whisky_meta en lignes label/valeur par section détail (commit 6/7 partagent FORM_SECTIONS). */
 function detailRows(w) {
   const meta = w.whisky_meta || {};
@@ -444,6 +515,7 @@ class WhiskyCard extends HTMLElement {
     this.attachShadow({ mode: "open" });
     this._data = { cellars: [], whiskies: [], tasting_log: [] };
     this._filters = { q: "", whisky_type: "", status: "", favorite: false };
+    this._view = "collection"; // "collection" | "finished" (onglet "🥂 Whisky bu")
   }
 
   setConfig(config) {
@@ -506,17 +578,48 @@ class WhiskyCard extends HTMLElement {
 
     const allWhiskies = (this._data && this._data.whiskies) || [];
     const filters = this._filters;
-    const whiskies = filterWhiskies(allWhiskies, filters);
+    const view = this._view;
+    // Sur l'onglet "Whisky bu", le filtre de statut n'a pas de sens (la vue
+    // ne montre que les exemplaires terminés) : on l'ignore pour ne pas
+    // masquer des fiches qui possèdent un exemplaire terminé mais dont un
+    // AUTRE exemplaire ne correspond pas au statut sélectionné.
+    const whiskies = filterWhiskies(allWhiskies, view === "finished" ? { ...filters, status: "" } : filters);
     const total = whiskies.reduce((n, w) => n + ((w.slots && w.slots.length) || 0), 0);
     const filtered = whiskies.length !== allWhiskies.length;
-    const hint = filtered
-      ? `${whiskies.length} fiche(s) affichée(s) sur ${allWhiskies.length} (${total} bouteille(s))`
-      : `${whiskies.length} fiche(s), ${total} bouteille(s)`;
-    const tiles = allWhiskies.length === 0
-      ? `<div class="wc-empty">Aucun whisky pour l'instant — cliquez sur ➕ Ajouter pour commencer votre collection.</div>`
-      : whiskies.length
-        ? `<div class="wc-grid-tiles">${whiskies.map((w) => tileHTML(w)).join("")}</div>`
-        : `<div class="wc-empty">Aucune fiche ne correspond à ces filtres.</div>`;
+
+    // Onglet "Whisky bu" : mélange les bouteilles terminées de la collection
+    // ET les dégustations hors collection (tasting_log), avec les mêmes
+    // filtres texte/type que la collection (le filtre "Coups de cœur" ne
+    // s'applique qu'aux bouteilles réellement possédées, donc masque les
+    // dégustations hors collection quand il est actif).
+    const allTastings = (this._data && this._data.tasting_log) || [];
+    const tastingMatches = (t) => {
+      if (filters.favorite) return false;
+      if (filters.whisky_type && (t.whisky_type || "") !== filters.whisky_type) return false;
+      const needle = String(filters.q || "").trim().toLowerCase();
+      if (!needle) return true;
+      const haystack = [t.name, t.distillery, t.region, t.country, t.place].filter(Boolean).join(" ").toLowerCase();
+      return haystack.includes(needle);
+    };
+    const tastings = view === "finished" ? allTastings.filter(tastingMatches) : [];
+    const merged = view === "finished" ? mergedTastingEntries(whiskies, tastings) : [];
+    const finishedCount = merged.filter((m) => m.kind === "finished").length;
+
+    const hint = view === "finished"
+      ? `${merged.length} whisky(s) bu(s)${merged.length ? ` (${finishedCount} de la collection, ${tastings.length} hors collection)` : ""}`
+      : filtered
+        ? `${whiskies.length} fiche(s) affichée(s) sur ${allWhiskies.length} (${total} bouteille(s))`
+        : `${whiskies.length} fiche(s), ${total} bouteille(s)`;
+
+    const body = view === "finished"
+      ? (merged.length
+          ? `<div class="wc-fin-list">${merged.map((m) => (m.kind === "finished" ? finishedRowHTML(m.entry) : tastingRowHTML(m.entry))).join("")}</div>`
+          : `<div class="wc-empty">Aucun whisky bu pour l'instant — terminez une bouteille ou ajoutez une dégustation hors collection.</div>`)
+      : (allWhiskies.length === 0
+          ? `<div class="wc-empty">Aucun whisky pour l'instant — cliquez sur ➕ Ajouter pour commencer votre collection.</div>`
+          : whiskies.length
+            ? `<div class="wc-grid-tiles">${whiskies.map((w) => tileHTML(w)).join("")}</div>`
+            : `<div class="wc-empty">Aucune fiche ne correspond à ces filtres.</div>`);
 
     const typeOptions = WHISKY_TYPE_VALUES.map((t) =>
       `<option value="${t}" ${filters.whisky_type === t ? "selected" : ""}>${t}</option>`).join("");
@@ -530,17 +633,22 @@ class WhiskyCard extends HTMLElement {
           <div class="wc-title">🥃 Whisky — Collection</div>
           <div class="wc-header-actions">
             <button class="wc-btn" id="wc-stats-btn">📊 Statistiques</button>
+            ${view === "finished" ? `<button class="wc-btn" id="wc-add-tasting">🥂 Ajouter une dégustation</button>` : ""}
             <button class="wc-btn wc-btn-primary" id="wc-add">➕ Ajouter</button>
           </div>
+        </div>
+        <div class="wc-tabs">
+          <button type="button" class="wc-tab ${view === "collection" ? "wc-tab-active" : ""}" id="wc-tab-collection">🥃 Collection</button>
+          <button type="button" class="wc-tab ${view === "finished" ? "wc-tab-active" : ""}" id="wc-tab-finished">🥂 Whisky bu</button>
         </div>
         <div class="wc-toolbar">
           <input type="search" id="wc-search" class="wc-search" placeholder="🔎 Nom, distillerie, région…" value="${escapeHtml(filters.q)}" />
           <select id="wc-filter-type"><option value="">Tous les types</option>${typeOptions}</select>
-          <select id="wc-filter-status"><option value="">Tous statuts</option>${statusOptions}</select>
+          ${view === "finished" ? "" : `<select id="wc-filter-status"><option value="">Tous statuts</option>${statusOptions}</select>`}
           <label class="wc-filter-fav"><input type="checkbox" id="wc-filter-fav" ${filters.favorite ? "checked" : ""} /> Coups de cœur</label>
         </div>
         <div class="wc-hint">${hint}</div>
-        ${tiles}
+        ${body}
       </div>
     `;
 
@@ -548,10 +656,27 @@ class WhiskyCard extends HTMLElement {
     if (addBtn) addBtn.addEventListener("click", () => this._openForm(null));
     const statsBtn = root.getElementById("wc-stats-btn");
     if (statsBtn) statsBtn.addEventListener("click", () => this._openStats());
+    const addTastingBtn = root.getElementById("wc-add-tasting");
+    if (addTastingBtn) addTastingBtn.addEventListener("click", () => this._openTastingForm());
+    const tabCollectionEl = root.getElementById("wc-tab-collection");
+    if (tabCollectionEl) tabCollectionEl.addEventListener("click", () => { this._view = "collection"; this._render(); });
+    const tabFinishedEl = root.getElementById("wc-tab-finished");
+    if (tabFinishedEl) tabFinishedEl.addEventListener("click", () => { this._view = "finished"; this._render(); });
     root.querySelectorAll("[data-whisky-id]").forEach((el) => {
       el.addEventListener("click", () => {
         const w = whiskies.find((x) => x.id === el.dataset.whiskyId);
         if (w) this._openDetail(w);
+      });
+    });
+    root.querySelectorAll(".wc-tasting-remove").forEach((btn) => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (!confirm("Supprimer cette dégustation ?")) return;
+        try {
+          await this._hass.callService(DOMAIN, "remove_tasting", { tasting_id: btn.dataset.tastingId });
+        } catch (err) {
+          alert(`Erreur : ${(err && err.message) || err}`);
+        }
       });
     });
 
@@ -926,6 +1051,86 @@ class WhiskyCard extends HTMLElement {
     });
   }
 
+  // ── Dégustation hors collection (onglet "🥂 Whisky bu") ───────────────────
+  // Formulaire volontairement plus léger que _formHTML : un whisky simplement
+  // goûté (bar, chez un ami, dégustation) n'a ni bouteille ni emplacement —
+  // svc_add_tasting alimente tasting_log, jamais whiskies[].
+
+  _openTastingForm() {
+    const box = this._openModal(this._tastingFormHTML());
+    this._bindTastingForm(box);
+  }
+
+  _tastingFormHTML() {
+    const today = new Date().toISOString().slice(0, 10);
+    const typeOptions = WHISKY_TYPE_VALUES.map((t) => `<option value="${t}">${t}</option>`).join("");
+    return `
+      <h2 class="wc-modal-title">🥂 Ajouter une dégustation</h2>
+      <p class="wc-photo-hint">Pour un whisky simplement goûté (bar, chez un ami, dégustation) — sans l'ajouter à votre collection.</p>
+      <form id="wc-tasting-form">
+        <fieldset class="wc-section">
+          <legend>Dégustation</legend>
+          <div class="wc-grid">
+            <label class="wc-field"><span>Nom *</span>
+              <input type="text" id="wc-t-name" required placeholder="ex. Talisker 18 Years Old" /></label>
+            <label class="wc-field"><span>Distillerie</span>
+              <input type="text" id="wc-t-distillery" /></label>
+            <label class="wc-field"><span>Type</span>
+              <select id="wc-t-type"><option value="">—</option>${typeOptions}</select></label>
+            <label class="wc-field"><span>Région</span>
+              <input type="text" id="wc-t-region" /></label>
+            <label class="wc-field"><span>Pays</span>
+              <input type="text" id="wc-t-country" /></label>
+            <label class="wc-field"><span>Lieu de dégustation</span>
+              <input type="text" id="wc-t-place" placeholder="ex. Chez Marc, Bar Le Malt" /></label>
+            <label class="wc-field"><span>Date</span>
+              <input type="date" id="wc-t-date" value="${today}" /></label>
+            <label class="wc-field"><span>Note (/5)</span>
+              <input type="number" id="wc-t-rating" step="0.5" min="0" max="5" /></label>
+            <label class="wc-field wc-field-wide"><span>Commentaire</span>
+              <textarea id="wc-t-comment" rows="2"></textarea></label>
+          </div>
+        </fieldset>
+        <div class="wc-actions">
+          <button type="button" class="wc-btn" id="wc-t-cancel">Annuler</button>
+          <button type="submit" class="wc-btn wc-btn-primary">Ajouter</button>
+        </div>
+      </form>
+    `;
+  }
+
+  _bindTastingForm(box) {
+    box.querySelector("#wc-t-cancel").addEventListener("click", () => this._closeModal());
+    box.querySelector("#wc-tasting-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const name = box.querySelector("#wc-t-name").value.trim();
+      if (!name) { this._toast(box, "Le nom du whisky est requis."); return; }
+      const payload = { name };
+      const distillery = box.querySelector("#wc-t-distillery").value.trim();
+      if (distillery) payload.distillery = distillery;
+      const whiskyType = box.querySelector("#wc-t-type").value;
+      if (whiskyType) payload.whisky_type = whiskyType;
+      const region = box.querySelector("#wc-t-region").value.trim();
+      if (region) payload.region = region;
+      const country = box.querySelector("#wc-t-country").value.trim();
+      if (country) payload.country = country;
+      const place = box.querySelector("#wc-t-place").value.trim();
+      if (place) payload.place = place;
+      const date = box.querySelector("#wc-t-date").value;
+      if (date) payload.tasted_date = date;
+      const ratingRaw = box.querySelector("#wc-t-rating").value;
+      if (ratingRaw !== "") payload.rating = Number(ratingRaw);
+      const comment = box.querySelector("#wc-t-comment").value.trim();
+      if (comment) payload.comment = comment;
+      try {
+        await this._hass.callService(DOMAIN, "add_tasting", payload);
+        this._closeModal();
+      } catch (err) {
+        this._toast(box, `Erreur : ${(err && err.message) || err}`);
+      }
+    });
+  }
+
   _toast(box, message) {
     let t = box.querySelector(".wc-toast");
     if (!t) {
@@ -1091,24 +1296,39 @@ class WhiskyCard extends HTMLElement {
         <div class="wc-recog-title">Résultats de la reconnaissance
           <span class="wc-conf-badge ${globalConf.cls}">Confiance globale : ${globalConf.label}</span>
         </div>
-        <p class="wc-recog-note">Décochez les champs à ne pas appliquer — rien n'est enregistré tant que vous n'avez pas cliqué sur « Appliquer » puis soumis le formulaire.</p>
+        <p class="wc-recog-note">Champs appliqués automatiquement au formulaire ci-dessous (sauf ceux déjà remplis à la main) — décochez/cochez puis « Appliquer » pour ajuster. Rien n'est enregistré tant que vous n'avez pas soumis le formulaire.</p>
         <div class="wc-recog-rows">${rows || "<em>Aucun champ exploitable.</em>"}</div>
         ${fields.length ? `<button type="button" class="wc-btn wc-btn-primary" id="wc-recog-apply">Appliquer les champs cochés</button>` : ""}
       </div>
     `;
+    // Applique dans le formulaire les champs actuellement cochés dans le
+    // panneau (clé → valeur du résultat Gemini). Utilisé une première fois
+    // automatiquement ci-dessous (dès que le résultat arrive, sans action de
+    // l'utilisateur), puis à nouveau à chaque clic sur « Appliquer » si la
+    // sélection de cases a changé entre-temps.
+    const applySelected = (silent) => {
+      const selected = [...panel.querySelectorAll(".wc-recog-check:checked")].map((c) => c.dataset.key);
+      for (const key of selected) {
+        const el = box.querySelector(`[data-key="${key}"]`);
+        if (!el) continue;
+        const value = result[key];
+        if (TRI_FIELDS.has(key)) el.value = triStateFromValue(value);
+        else el.value = value;
+      }
+      if (!silent) this._toast(box, `${selected.length} champ(s) appliqué(s) — vérifiez puis enregistrez.`);
+      return selected.length;
+    };
+    // Application automatique immédiate (fix : jusqu'ici rien n'était copié
+    // dans le formulaire tant que l'utilisateur ne cliquait pas explicitement
+    // sur « Appliquer », ce qui donnait l'impression que la reconnaissance ne
+    // servait à rien).
+    const appliedCount = applySelected(true);
+    if (appliedCount > 0) {
+      this._toast(box, `${appliedCount} champ(s) identifié(s) et appliqué(s) automatiquement — vérifiez puis enregistrez.`);
+    }
     const applyBtn = panel.querySelector("#wc-recog-apply");
     if (applyBtn) {
-      applyBtn.addEventListener("click", () => {
-        const selected = [...panel.querySelectorAll(".wc-recog-check:checked")].map((c) => c.dataset.key);
-        for (const key of selected) {
-          const el = box.querySelector(`[data-key="${key}"]`);
-          if (!el) continue;
-          const value = result[key];
-          if (TRI_FIELDS.has(key)) el.value = triStateFromValue(value);
-          else el.value = value;
-        }
-        this._toast(box, `${selected.length} champ(s) appliqué(s) — vérifiez puis enregistrez.`);
-      });
+      applyBtn.addEventListener("click", () => applySelected(false));
     }
   }
 }
@@ -1135,6 +1355,14 @@ const CARD_CSS = `
   .wc-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
   .wc-header-actions { display: flex; gap: 8px; flex-wrap: wrap; }
   .wc-title { font-size: 1.15em; font-weight: 700; letter-spacing: .01em; }
+  .wc-tabs { display: flex; gap: 4px; margin-top: 12px; border-bottom: 1px solid var(--divider-color, #ddd); }
+  .wc-tab {
+    border: none; background: none; color: var(--primary-text-color, #000); opacity: .65; cursor: pointer;
+    padding: 8px 4px; font-size: .95em; font-weight: 600; border-bottom: 2px solid transparent; margin-bottom: -1px;
+    transition: opacity .15s ease, border-color .15s ease;
+  }
+  .wc-tab:hover { opacity: .9; }
+  .wc-tab-active { opacity: 1; border-bottom-color: #d97706; color: #b45309; }
   .wc-hint { opacity: .75; font-size: .9em; margin-top: 8px; }
   .wc-btn {
     border: 1px solid var(--divider-color, #ccc); background: var(--secondary-background-color, #f2f2f2);
@@ -1178,6 +1406,30 @@ const CARD_CSS = `
   .wc-tile-sub { font-size: .82em; opacity: .75; }
   .wc-tile-status { font-size: .78em; opacity: .8; margin-top: 4px; }
   .wc-tile-rating { font-size: .85em; color: #d97706; margin-top: 2px; }
+
+  .wc-fin-list { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+  .wc-fin-row {
+    display: flex; align-items: center; gap: 10px; border: 1px solid var(--divider-color, #ddd); border-radius: 10px;
+    padding: 8px 10px; cursor: pointer; background: var(--secondary-background-color, #fafafa);
+    transition: box-shadow .15s ease, border-color .15s ease;
+  }
+  .wc-fin-row:hover { box-shadow: 0 2px 10px rgba(146, 64, 14, .18); border-color: #d97706; }
+  .wc-fin-img { width: 46px; height: 46px; border-radius: 8px; object-fit: cover; flex: 0 0 auto; }
+  .wc-fin-img-placeholder {
+    display: flex; align-items: center; justify-content: center; font-size: 1.4em;
+    background: linear-gradient(135deg, #f2c675, #b45309 65%, #6b3410);
+  }
+  .wc-fin-body { flex: 1 1 auto; min-width: 0; }
+  .wc-fin-name { font-weight: 600; font-size: .95em; }
+  .wc-fin-sub { font-size: .82em; opacity: .75; }
+  .wc-fin-date { font-size: .8em; opacity: .8; margin-top: 2px; }
+  .wc-fin-comment { font-size: .8em; opacity: .7; font-style: italic; margin-top: 2px; }
+  .wc-fin-rating { font-size: .85em; color: #d97706; flex: 0 0 auto; white-space: nowrap; }
+  .wc-tasting-badge { color: #b45309; opacity: .85; }
+  .wc-tasting-remove {
+    flex: 0 0 auto; padding: 4px 8px; font-size: .9em; line-height: 1; background: none; border-color: transparent;
+  }
+  .wc-tasting-remove:hover { border-color: #a33; background: rgba(170, 51, 51, .08); }
 `;
 
 const MODAL_CSS = `
@@ -1278,6 +1530,7 @@ if (typeof module !== "undefined" && module.exports) {
     escapeHtml, STATUS_ORDER, STATUS_DOT, statusBreakdown, statusSummary,
     ratingStars, metaLine, tileHTML, detailRows,
     matchesQuery, matchesStatusFilter, filterWhiskies, breakdownJS,
-    computeStats, topBreakdown,
+    computeStats, topBreakdown, finishedEntries, finishedRowHTML,
+    tastingRowHTML, mergedTastingEntries,
   };
 }
