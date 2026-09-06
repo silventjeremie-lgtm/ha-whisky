@@ -14,7 +14,7 @@
 // testées avec Node (voir tests/), sans dépendre d'un navigateur ou de HA.
 
 const DOMAIN = "whisky";
-const VERSION = "1.2.1";
+const VERSION = "1.2.2";
 
 // Doit rester synchronisé avec WHISKY_TYPE_VALUES dans __init__.py.
 const WHISKY_TYPE_VALUES = [
@@ -1276,12 +1276,21 @@ class WhiskyCard extends HTMLElement {
       panel.innerHTML = `<div class="wc-recog-panel wc-recog-empty">Aucune information exploitable identifiée sur cette photo — complétez à la main.</div>`;
       return;
     }
+    // Les champs du VRAI formulaire (data-key) vivent dans <form id="wc-form">,
+    // un frère du panneau de reconnaissance — jamais à l'intérieur. On y
+    // scope systématiquement les lookups [data-key] ci-dessous : sans ça,
+    // box.querySelector('[data-key=...]') matche EN PREMIER la case à cocher
+    // du panneau (qui porte elle aussi data-key, et précède le formulaire
+    // dans le DOM), et écrit silencieusement la valeur sur cette case au
+    // lieu du champ visible — c'est ce qui rendait l'application (auto ou
+    // via le bouton) totalement invisible à l'écran.
+    const formEl = box.querySelector("#wc-form");
     const result = resp.result;
     const fields = recognitionFieldList(result);
     const globalConf = confidenceTier(result.confidence_score);
     const rows = fields.map((f) => {
       const tier = confidenceTier(f.confidence);
-      const currentEl = box.querySelector(`[data-key="${f.key}"]`);
+      const currentEl = formEl && formEl.querySelector(`[data-key="${f.key}"]`);
       const alreadyFilled = currentEl && (currentEl.type === "checkbox" ? currentEl.checked : String(currentEl.value || "").trim() !== "");
       return `
         <label class="wc-recog-row">
@@ -1309,7 +1318,7 @@ class WhiskyCard extends HTMLElement {
     const applySelected = (silent) => {
       const selected = [...panel.querySelectorAll(".wc-recog-check:checked")].map((c) => c.dataset.key);
       for (const key of selected) {
-        const el = box.querySelector(`[data-key="${key}"]`);
+        const el = formEl && formEl.querySelector(`[data-key="${key}"]`);
         if (!el) continue;
         const value = result[key];
         if (TRI_FIELDS.has(key)) el.value = triStateFromValue(value);
